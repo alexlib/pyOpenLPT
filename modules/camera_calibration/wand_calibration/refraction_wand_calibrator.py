@@ -1027,7 +1027,114 @@ class RefractiveWandCalibrator:
             X_B_list=X_B_list,
             active_cam_ids=active_cam_ids,
         )
-        
+
+    def _debug_frame_consistency_check(
+        self,
+        ba_optimizer,
+        X_A_scaled,
+        X_B_scaled,
+        cam_params_pre_ba,
+        cam_params_post_ba,
+    ):
+        """Debug helper: compare caller-side X_A_scaled (bootstrap frame) vs
+        BA-internal _bundle_points (post-alignment frame).
+
+        Gated on OPENLPT_DEBUG_RADIUS=1 env var — no output otherwise.
+        """
+        if os.environ.get('OPENLPT_DEBUG_RADIUS') != '1':
+            return
+
+        sep = "=" * 72
+        print(f"\n{sep}")
+        print("[DEBUG_FRAME_CHECK] Frame consistency: caller X_A_scaled vs ba._bundle_points")
+        print(sep)
+
+        # --- 1. Sample 3 frame IDs ---
+        bundle_pts = getattr(ba_optimizer, '_bundle_points', None)
+        if bundle_pts is None:
+            print("  [WARN] ba_optimizer._bundle_points is None — cannot compare")
+            return
+
+        common_fids = sorted(set(X_A_scaled.keys()) & set(bundle_pts.keys()))
+        if not common_fids:
+            print("  [WARN] No common frame IDs between X_A_scaled and _bundle_points")
+            return
+
+        sample_fids = common_fids[:3]
+        print(f"\n  Sample frame IDs (first 3 of {len(common_fids)} common): {sample_fids}")
+
+        print("\n  --- Caller-side X_A_scaled (pre-alignment / bootstrap frame) ---")
+        for fid in sample_fids:
+            pt = X_A_scaled[fid]
+            print(f"    fid={fid}: [{pt[0]:.6f}, {pt[1]:.6f}, {pt[2]:.6f}]")
+
+        print("\n  --- BA-internal _bundle_points[fid]['A'] (post-alignment frame) ---")
+        for fid in sample_fids:
+            ep = bundle_pts.get(fid, {})
+            pt_ba = ep.get('A')
+            if pt_ba is not None:
+                print(f"    fid={fid}: [{pt_ba[0]:.6f}, {pt_ba[1]:.6f}, {pt_ba[2]:.6f}]")
+            else:
+                print(f"    fid={fid}: None")
+
+        # --- 2. Centroid comparison ---
+        caller_pts = []
+        ba_pts = []
+        for fid in common_fids:
+            pt_caller = X_A_scaled.get(fid)
+            ep = bundle_pts.get(fid, {})
+            pt_ba = ep.get('A')
+            if pt_caller is not None and pt_ba is not None:
+                caller_pts.append(np.asarray(pt_caller, dtype=np.float64))
+                ba_pts.append(np.asarray(pt_ba, dtype=np.float64))
+
+        if caller_pts and ba_pts:
+            centroid_caller = np.mean(caller_pts, axis=0)
+            centroid_ba = np.mean(ba_pts, axis=0)
+            centroid_dist = float(np.linalg.norm(centroid_caller - centroid_ba))
+
+            print(f"\n  --- Centroid comparison ({len(caller_pts)} points) ---")
+            print(f"    Centroid(X_A_scaled) = [{centroid_caller[0]:.6f}, {centroid_caller[1]:.6f}, {centroid_caller[2]:.6f}]")
+            print(f"    Centroid(_bundle_A)  = [{centroid_ba[0]:.6f}, {centroid_ba[1]:.6f}, {centroid_ba[2]:.6f}]")
+            print(f"    ||centroid_caller - centroid_ba|| = {centroid_dist:.6f} mm")
+            frame_mismatch = centroid_dist > 1.0  # >1mm => mismatch
+            print(f"    FRAME_MISMATCH={'True' if frame_mismatch else 'False'} (threshold=1.0mm)")
+        else:
+            centroid_dist = float('nan')
+            frame_mismatch = None
+            print("\n  [WARN] No valid paired points for centroid comparison")
+
+        # --- 3. Alignment flag ---
+        # No explicit _alignment_applied flag; check if _bundle_points differ from initial
+        # by looking at whether coordinate alignment was called (pre_last_loop_align_done is local to optimize())
+        # We infer alignment from the centroid distance itself.
+        print(f"\n  --- Alignment inference ---")
+        print(f"    (BA has no public _alignment_applied flag; inferred from centroid distance)")
+        if centroid_dist is not None and np.isfinite(centroid_dist):
+            print(f"    Alignment likely applied: {'Yes' if centroid_dist > 0.001 else 'No (points coincide)'}")
+        else:
+            print(f"    Alignment status: indeterminate")
+
+        # --- 4. Camera center comparison: pre-BA vs post-BA ---
+        print(f"\n  --- Camera center comparison (pre-BA vs post-BA) ---")
+        sample_cids = sorted(cam_params_post_ba.keys())[:2]
+        for cid in sample_cids:
+            p_pre = cam_params_pre_ba.get(cid)
+            p_post = cam_params_post_ba.get(cid)
+            if p_pre is not None and p_post is not None:
+                R_pre, _ = cv2.Rodrigues(p_pre[0:3])
+                C_pre = camera_center(R_pre, p_pre[3:6])
+                R_post, _ = cv2.Rodrigues(p_post[0:3])
+                C_post = camera_center(R_post, p_post[3:6])
+                shift = float(np.linalg.norm(C_post - C_pre))
+                print(f"    cam {cid}: C_pre=[{C_pre[0]:.3f}, {C_pre[1]:.3f}, {C_pre[2]:.3f}]")
+                print(f"             C_post=[{C_post[0]:.3f}, {C_post[1]:.3f}, {C_post[2]:.3f}]")
+                print(f"             ||shift||={shift:.6f} mm")
+
+        print(sep)
+        print("[DEBUG_FRAME_CHECK] END")
+        print(f"{sep}\n")
+
     def _estimate_and_log_sphere_radii(self, dataset, cam_params, points_3d_A, points_3d_B, tag="P1", cams_cpp=None):
         """
         Step 1: Estimate and Log sphere radii (mm)
@@ -2299,6 +2406,9 @@ class RefractiveWandCalibrator:
             progress_callback=progress_callback
         )
 
+        # Snapshot cam_params before BA for debug comparison
+        _cam_params_pre_ba = {cid: p.copy() for cid, p in cam_params.items()}
+
         use_ba_cache = False
         loaded_cache = False
         if use_ba_cache:
@@ -2318,15 +2428,44 @@ class RefractiveWandCalibrator:
             # Save cache
             ba_optimizer.save_cache(out_path)
 
+        # Sync caller-side 3D points to post-alignment frame (H1 fix)
+        # After ba_optimizer.optimize(), cam_params is in post-alignment frame but
+        # X_A_scaled/X_B_scaled remain in pre-alignment bootstrap frame.
+        # Bring them into alignment by reading back from _bundle_points.
+        if hasattr(ba_optimizer, '_bundle_points') and ba_optimizer._bundle_points:
+            for fid, ep in ba_optimizer._bundle_points.items():
+                if ep.get('A') is not None:
+                    X_A_scaled[fid] = ep['A'].copy()
+                if ep.get('B') is not None:
+                    X_B_scaled[fid] = ep['B'].copy()
+
+        # --- Debug: frame consistency check (gated on OPENLPT_DEBUG_RADIUS=1) ---
+        if X_A_scaled and X_B_scaled:
+            self._debug_frame_consistency_check(
+                ba_optimizer=ba_optimizer,
+                X_A_scaled=X_A_scaled,
+                X_B_scaled=X_B_scaled,
+                cam_params_pre_ba=_cam_params_pre_ba,
+                cam_params_post_ba=cam_params,
+            )
+
         # === Phase Round4: Intrinsics + Thickness ===
         # [USER REQUEST] Re-estimate Radii with latest params (post-BA)
         if X_A_scaled and X_B_scaled:
             rs, rl = self._estimate_and_log_sphere_radii(
                 dataset, cam_params, X_A_scaled, X_B_scaled, tag="Round4 Pre-Calc", cams_cpp=cams_cpp
             )
-            dataset['est_radius_small_mm'] = rs
-            dataset['est_radius_large_mm'] = rl
-            print(f"[ROUND4] Updated estimated radii: Small={rs:.3f}mm, Large={rl:.3f}mm")
+            if np.isfinite(rs) and rs > 0.5 and np.isfinite(rl) and rl > 0.5:
+                dataset['est_radius_small_mm'] = rs
+                dataset['est_radius_large_mm'] = rl
+                print(f"[ROUND4] Updated estimated radii: Small={rs:.3f}mm, Large={rl:.3f}mm")
+            else:
+                rs = dataset.get('est_radius_small_mm', rs)
+                rl = dataset.get('est_radius_large_mm', rl)
+                self.reporter.info(
+                    f"ROUND4: Radius estimate invalid (rs={rs:.3f}, rl={rl:.3f}), "
+                    "keeping BA pre-calc values"
+                )
 
         cam_params, cams_cpp, stored_dir = self._export_and_reload_camfiles(
             cam_params=cam_params,
