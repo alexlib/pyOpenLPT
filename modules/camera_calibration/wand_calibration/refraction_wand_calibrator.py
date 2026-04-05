@@ -2084,6 +2084,7 @@ class RefractiveWandCalibrator:
                         observations=observations,
                         camera_settings=camera_settings,
                         all_cam_ids=all_cam_ids,
+                        ranked_seed_pairs=ranked_pairs,
                         progress_callback=progress_callback
                     )
                 except P0FailureError as p0e:
@@ -2104,6 +2105,7 @@ class RefractiveWandCalibrator:
                             observations=observations,
                             camera_settings=camera_settings,
                             all_cam_ids=all_cam_ids,
+                            ranked_seed_pairs=ranked_pairs,
                             progress_callback=progress_callback
                         )
                         best_pair = fallback_pair

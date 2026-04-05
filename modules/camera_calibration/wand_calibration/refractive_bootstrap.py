@@ -1,3 +1,4 @@
+# pyright: reportMissingImports=false, reportAttributeAccessIssue=false, reportCallIssue=false, reportArgumentType=false
 """
 Refractive Bootstrap (P0 Stage)
 ===============================
@@ -38,6 +39,39 @@ P0_REASON_PHASE1_BA_FAILURE = "phase1_ba_failure"
 
 
 @dataclass
+class Phase2CameraTelemetry:
+    """Phase-2 per-camera diagnostics for added cameras."""
+    camera_id: int
+    total_correspondences: int = 0
+    prefilter_candidate_removed: int = 0
+    prefilter_removed: int = 0
+    prefilter_removed_nonfinite: int = 0
+    prefilter_removed_depth: int = 0
+    prefilter_removed_wand_length: int = 0
+    prefilter_removed_angle: int = 0
+    prefilter_kept: int = 0
+    prefilter_min_correspondences: int = 6
+    prefilter_starvation_fallback: bool = False
+    pnp_correspondences: int = 0
+    ransac_inliers: Optional[int] = None
+    ransac_inlier_ratio: Optional[float] = None
+    reproj_rms_px: Optional[float] = None
+    confidence_label: str = "normal"
+    confidence_warning: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        d = {}
+        for k, v in asdict(self).items():
+            if isinstance(v, (np.floating, np.integer)):
+                d[k] = float(v)
+            elif isinstance(v, np.ndarray):
+                d[k] = v.tolist()
+            else:
+                d[k] = v
+        return d
+
+
+@dataclass
 class P0Telemetry:
     """Structured P0 diagnostics for debugging and downstream classification."""
     selected_pair: Optional[Tuple[int, int]] = None
@@ -74,12 +108,28 @@ class P0Telemetry:
     # Failure tracking
     failure_reason: str = P0_REASON_OK
     failure_detail: Optional[str] = None
+    
+    # Phase-2 per-camera telemetry
+    phase2_cameras: Dict[int, Phase2CameraTelemetry] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-friendly dict."""
         d = {}
         for k, v in asdict(self).items():
-            if isinstance(v, (np.floating, np.integer)):
+            if k == "phase2_cameras":
+                phase2_dict = {}
+                for cid, cam_dict in v.items():
+                    sanitized = {}
+                    for ck, cv in cam_dict.items():
+                        if isinstance(cv, (np.floating, np.integer)):
+                            sanitized[ck] = float(cv)
+                        elif isinstance(cv, np.ndarray):
+                            sanitized[ck] = cv.tolist()
+                        else:
+                            sanitized[ck] = cv
+                    phase2_dict[cid] = sanitized
+                d[k] = phase2_dict
+            elif isinstance(v, (np.floating, np.integer)):
                 d[k] = float(v)
             elif isinstance(v, np.ndarray):
                 d[k] = v.tolist()
@@ -574,6 +624,26 @@ class PinholeBootstrapP0Config:
     ui_focal_px: float = 9000.0  # UI-provided focal length (FROZEN)
     ftol: float = 1e-6
     xtol: float = 1e-6
+    
+    # Phase-2 prefiltering thresholds
+    phase2_prefilter_wand_length_error_mm: float = 2.0  # Max wand length error before removing a 3D point
+    phase2_prefilter_depth_min_mm: float = 100.0        # Min depth (Z-coord in cam frame) to prevent behind-camera
+    phase2_prefilter_depth_max_mm: float = 10000.0      # Max depth to prevent extreme-depth outliers
+    phase2_prefilter_min_triangulation_angle_deg: float = 0.5
+    
+    # Phase-2 RANSAC PnP settings
+    phase2_ransac_enabled: bool = False                  # Enable RANSAC for added-camera PnP
+    phase2_ransac_reproj_threshold_px: float = 3.0       # Inlier threshold (px) for RANSAC PnP
+    phase2_ransac_confidence: float = 0.999              # RANSAC confidence level
+    phase2_ransac_min_inlier_ratio: float = 0.5          # Min inlier ratio to accept RANSAC result
+    
+    # Phase-2 confidence labeling thresholds
+    phase2_confidence_min_correspondences: int = 12      # Min 2D-3D pairs for normal confidence
+    phase2_confidence_max_reproj_rms_px: float = 5.0     # Max RMS for normal confidence
+    phase2_confidence_min_inlier_ratio: float = 0.6      # Min inlier ratio for normal confidence (when RANSAC enabled)
+
+    phase2_pair_fallback_rms_threshold_px: float = 35.0
+    phase2_pair_fallback_max_retries: int = 2
 
 
 class PinholeBootstrapP0:
@@ -588,6 +658,7 @@ class PinholeBootstrapP0:
     
     def __init__(self, config: PinholeBootstrapP0Config):
         self.config = config
+        self.last_phase2_telemetry: Dict[int, dict] = {}
 
     @staticmethod
     def _get_camera_intrinsics(cam_id: int, camera_settings: Dict[int, dict]) -> Tuple[np.ndarray, float, float, float]:
@@ -1031,6 +1102,295 @@ class PinholeBootstrapP0:
         if t < 0.0:
             return float(np.linalg.norm(v))
         return float(np.linalg.norm(v - t * d))
+
+    def _compute_triangulation_angle_deg(
+        self,
+        X: np.ndarray,
+        cam_center_a: np.ndarray,
+        cam_center_b: np.ndarray,
+    ) -> float:
+        v1 = np.asarray(cam_center_a, dtype=np.float64) - np.asarray(X, dtype=np.float64)
+        v2 = np.asarray(cam_center_b, dtype=np.float64) - np.asarray(X, dtype=np.float64)
+        n1 = float(np.linalg.norm(v1))
+        n2 = float(np.linalg.norm(v2))
+        if n1 <= 1e-12 or n2 <= 1e-12:
+            return 0.0
+        cosang = float(np.dot(v1, v2) / (n1 * n2))
+        cosang = float(np.clip(cosang, -1.0, 1.0))
+        return float(np.degrees(np.arccos(cosang)))
+
+    def _classify_phase2_seed_frame(
+        self,
+        XA: np.ndarray,
+        XB: np.ndarray,
+        R_i: np.ndarray,
+        t_i: np.ndarray,
+        R_j: np.ndarray,
+        t_j: np.ndarray,
+        cam_center_i: np.ndarray,
+        cam_center_j: np.ndarray,
+    ) -> Optional[str]:
+        pts = [np.asarray(XA, dtype=np.float64), np.asarray(XB, dtype=np.float64)]
+        if any((pt.shape != (3,)) or (not np.all(np.isfinite(pt))) for pt in pts):
+            return "nonfinite"
+
+        depth_min = float(self.config.phase2_prefilter_depth_min_mm)
+        depth_max = float(self.config.phase2_prefilter_depth_max_mm)
+        for pt in pts:
+            zi = float((R_i @ pt.reshape(3, 1) + t_i)[2, 0])
+            zj = float((R_j @ pt.reshape(3, 1) + t_j)[2, 0])
+            if not np.isfinite(zi) or not np.isfinite(zj):
+                return "nonfinite"
+            if zi < depth_min or zi > depth_max or zj < depth_min or zj > depth_max:
+                return "depth"
+
+        wand_len = float(np.linalg.norm(pts[1] - pts[0]))
+        if (not np.isfinite(wand_len)) or (
+            abs(wand_len - float(self.config.wand_length_mm)) > float(self.config.phase2_prefilter_wand_length_error_mm)
+        ):
+            return "wand_length"
+
+        min_angle = float(self.config.phase2_prefilter_min_triangulation_angle_deg)
+        if min_angle > 0.0:
+            angles = [
+                self._compute_triangulation_angle_deg(pt, cam_center_i, cam_center_j)
+                for pt in pts
+            ]
+            if min(angles) < min_angle:
+                return "angle"
+
+        return None
+
+    def _build_phase2_correspondences(
+        self,
+        cid: int,
+        observations: Dict[int, Dict[int, Tuple[np.ndarray, np.ndarray]]],
+        points_3d: Dict[int, Tuple[np.ndarray, np.ndarray]],
+        params_i: np.ndarray,
+        params_j: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, Phase2CameraTelemetry]:
+        telemetry = Phase2CameraTelemetry(camera_id=cid)
+        telemetry.prefilter_min_correspondences = 6
+
+        R_i, _ = cv2.Rodrigues(params_i[:3])
+        t_i = params_i[3:6].reshape(3, 1)
+        R_j, _ = cv2.Rodrigues(params_j[:3])
+        t_j = params_j[3:6].reshape(3, 1)
+        cam_center_i = _camera_center(R_i, t_i)
+        cam_center_j = _camera_center(R_j, t_j)
+
+        kept_2d: List[np.ndarray] = []
+        kept_3d: List[np.ndarray] = []
+        raw_2d: List[np.ndarray] = []
+        raw_3d: List[np.ndarray] = []
+
+        for fid, (XA, XB) in points_3d.items():
+            if fid not in observations or cid not in observations[fid]:
+                continue
+            uvA, uvB = observations[fid][cid]
+
+            frame_pairs = []
+            if uvA is not None:
+                frame_pairs.append((np.asarray(uvA, dtype=np.float64), np.asarray(XA, dtype=np.float64)))
+            if uvB is not None:
+                frame_pairs.append((np.asarray(uvB, dtype=np.float64), np.asarray(XB, dtype=np.float64)))
+            if not frame_pairs:
+                continue
+
+            telemetry.total_correspondences += len(frame_pairs)
+            for uv, X in frame_pairs:
+                raw_2d.append(uv)
+                raw_3d.append(X)
+
+            reason = self._classify_phase2_seed_frame(
+                np.asarray(XA, dtype=np.float64),
+                np.asarray(XB, dtype=np.float64),
+                R_i,
+                t_i,
+                R_j,
+                t_j,
+                cam_center_i,
+                cam_center_j,
+            ) if cam_center_i is not None and cam_center_j is not None else None
+
+            if reason is None:
+                for uv, X in frame_pairs:
+                    kept_2d.append(uv)
+                    kept_3d.append(X)
+                continue
+
+            removed = len(frame_pairs)
+            telemetry.prefilter_candidate_removed += removed
+            if reason == "nonfinite":
+                telemetry.prefilter_removed_nonfinite += removed
+            elif reason == "depth":
+                telemetry.prefilter_removed_depth += removed
+            elif reason == "wand_length":
+                telemetry.prefilter_removed_wand_length += removed
+            elif reason == "angle":
+                telemetry.prefilter_removed_angle += removed
+
+        telemetry.prefilter_removed = telemetry.prefilter_candidate_removed
+        telemetry.prefilter_kept = len(kept_2d)
+
+        if telemetry.prefilter_candidate_removed > 0 and telemetry.prefilter_kept < telemetry.prefilter_min_correspondences:
+            telemetry.prefilter_starvation_fallback = True
+            telemetry.prefilter_removed = 0
+            telemetry.prefilter_kept = len(raw_2d)
+            kept_2d = raw_2d
+            kept_3d = raw_3d
+            print(
+                f"    [PREFILTER] cam_{cid}: candidate filter would keep only {telemetry.prefilter_candidate_removed} removed / "
+                f"{telemetry.total_correspondences} total below floor {telemetry.prefilter_min_correspondences}; restoring all correspondences."
+            )
+        elif telemetry.prefilter_candidate_removed > 0:
+            print(
+                f"    [PREFILTER] cam_{cid}: removed {telemetry.prefilter_removed}/{telemetry.total_correspondences} correspondences "
+                f"(nonfinite={telemetry.prefilter_removed_nonfinite}, depth={telemetry.prefilter_removed_depth}, "
+                f"wand={telemetry.prefilter_removed_wand_length}, angle={telemetry.prefilter_removed_angle})."
+            )
+
+        return (
+            np.asarray(kept_2d, dtype=np.float64),
+            np.asarray(kept_3d, dtype=np.float64),
+            telemetry,
+        )
+
+    def _label_phase2_confidence(self, telemetry: Phase2CameraTelemetry):
+        warnings: List[str] = []
+
+        if telemetry.pnp_correspondences < int(self.config.phase2_confidence_min_correspondences):
+            warnings.append("insufficient_correspondences")
+
+        min_inlier_ratio = float(self.config.phase2_confidence_min_inlier_ratio)
+        if telemetry.ransac_inlier_ratio is not None and telemetry.ransac_inlier_ratio < min_inlier_ratio:
+            warnings.append("low_inlier_ratio")
+
+        if (
+            telemetry.reproj_rms_px is not None
+            and telemetry.reproj_rms_px > float(self.config.phase2_confidence_max_reproj_rms_px)
+        ):
+            warnings.append("high_rms")
+
+        telemetry.confidence_label = "low" if warnings else "normal"
+        telemetry.confidence_warning = ",".join(warnings) if warnings else None
+
+    def _compute_phase2_reproj_rms(
+        self,
+        pts_3d_arr: np.ndarray,
+        pts_2d: np.ndarray,
+        rvec: np.ndarray,
+        tvec: np.ndarray,
+        K: np.ndarray,
+        dist_coeffs: np.ndarray,
+    ) -> float:
+        pts_reproj, _ = cv2.projectPoints(pts_3d_arr, rvec, tvec, K, dist_coeffs)
+        pts_reproj = pts_reproj.reshape(-1, 2)
+        return float(np.sqrt(np.mean(np.sum((pts_2d - pts_reproj) ** 2, axis=1))))
+
+    @staticmethod
+    def _normalize_seed_pair(pair: Tuple[int, int]) -> Tuple[int, int]:
+        return (int(pair[0]), int(pair[1]))
+
+    def _build_seed_pair_attempts(
+        self,
+        cam_i: int,
+        cam_j: int,
+        ranked_seed_pairs: Optional[List[Tuple[int, int]]],
+    ) -> List[Tuple[int, int]]:
+        ordered_pairs: List[Tuple[int, int]] = [self._normalize_seed_pair((cam_i, cam_j))]
+        if ranked_seed_pairs:
+            for pair in ranked_seed_pairs:
+                norm_pair = self._normalize_seed_pair(pair)
+                if norm_pair not in ordered_pairs:
+                    ordered_pairs.append(norm_pair)
+        return ordered_pairs
+
+    @staticmethod
+    def _summarize_phase2_rms(phase2_telemetry: Dict[int, dict]) -> Tuple[Optional[float], Optional[float]]:
+        finite_rms_values: List[float] = []
+        for cam_telem in phase2_telemetry.values():
+            rms = cam_telem.get('reproj_rms_px') if isinstance(cam_telem, dict) else None
+            if rms is None:
+                continue
+            rms_float = float(rms)
+            if np.isfinite(rms_float):
+                finite_rms_values.append(rms_float)
+
+        if not finite_rms_values:
+            return None, None
+
+        return float(np.max(finite_rms_values)), float(np.median(finite_rms_values))
+
+    def _should_retry_seed_pair_from_phase2_rms(
+        self,
+        phase2_rms_max_px: Optional[float],
+        attempt_index: int,
+        total_attempts: int,
+    ) -> bool:
+        threshold = float(self.config.phase2_pair_fallback_rms_threshold_px)
+        if threshold <= 0.0 or phase2_rms_max_px is None:
+            return False
+        if phase2_rms_max_px <= threshold:
+            return False
+        return attempt_index < total_attempts - 1
+
+    def _solve_phase2_initial_pose(
+        self,
+        cid: int,
+        pts_2d: np.ndarray,
+        pts_3d_arr: np.ndarray,
+        K: np.ndarray,
+        dist_coeffs: np.ndarray,
+        telemetry: Phase2CameraTelemetry,
+    ) -> Tuple[bool, Optional[np.ndarray], Optional[np.ndarray], np.ndarray, np.ndarray]:
+        if not bool(self.config.phase2_ransac_enabled):
+            success, rvec, tvec = cv2.solvePnP(
+                pts_3d_arr, pts_2d, K, dist_coeffs,
+                flags=cv2.SOLVEPNP_EPNP,
+            )
+            if not success:
+                return False, None, None, pts_2d, pts_3d_arr
+            return True, rvec, tvec, pts_2d, pts_3d_arr
+
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(
+            pts_3d_arr,
+            pts_2d,
+            K,
+            dist_coeffs,
+            flags=cv2.SOLVEPNP_EPNP,
+            reprojectionError=float(self.config.phase2_ransac_reproj_threshold_px),
+            confidence=float(self.config.phase2_ransac_confidence),
+        )
+        if not success:
+            return False, None, None, pts_2d, pts_3d_arr
+
+        if inliers is None or len(inliers) == 0:
+            inlier_idx = np.arange(len(pts_2d), dtype=np.int32)
+        else:
+            inlier_idx = np.asarray(inliers, dtype=np.int32).reshape(-1)
+
+        telemetry.ransac_inliers = int(len(inlier_idx))
+        telemetry.ransac_inlier_ratio = float(len(inlier_idx) / max(1, len(pts_2d)))
+
+        refine_pts_2d = pts_2d[inlier_idx]
+        refine_pts_3d = pts_3d_arr[inlier_idx]
+
+        min_ratio = float(self.config.phase2_ransac_min_inlier_ratio)
+        if telemetry.ransac_inlier_ratio < min_ratio:
+            print(
+                f"    [RANSAC] cam_{cid}: low inlier ratio "
+                f"{telemetry.ransac_inlier_ratio:.3f} < {min_ratio:.3f}; retaining pose with inlier-only refinement."
+            )
+
+        if len(refine_pts_2d) < telemetry.prefilter_min_correspondences:
+            print(
+                f"    [RANSAC] cam_{cid}: only {len(refine_pts_2d)} inliers; "
+                f"falling back to all correspondences for refinement floor {telemetry.prefilter_min_correspondences}."
+            )
+            return True, rvec, tvec, pts_2d, pts_3d_arr
+
+        return True, rvec, tvec, refine_pts_2d, refine_pts_3d
     
     def _collect_valid_frames(
         self,
@@ -1155,7 +1515,14 @@ class PinholeBootstrapP0:
         - Solve PnP with frozen intrinsics
         """
         dist_coeffs = np.zeros(5)
+        self.last_phase2_telemetry = {}
         
+        seed_cam_ids = list(cam_params.keys())
+        if len(seed_cam_ids) < 2:
+            print("[P0 Phase 2] Need at least two seed cameras. Skipping.")
+            return cam_params
+        seed_cam_i, seed_cam_j = seed_cam_ids[:2]
+
         calibrated_cams = set(cam_params.keys())
         remaining_cams = [c for c in all_cam_ids if c not in calibrated_cams]
         
@@ -1171,70 +1538,66 @@ class PinholeBootstrapP0:
         
         for cid in remaining_cams:
             print(f"\n  --- Calibrating cam_{cid} ---")
-            
-            # Collect 2D-3D correspondences
-            pts_2d = []
-            pts_3d_list = []
-            
-            for fid, (XA, XB) in points_3d.items():
-                if fid not in observations:
-                    continue
-                if cid not in observations[fid]:
-                    continue
-                    
-                uvA, uvB = observations[fid][cid]
-                if uvA is not None:
-                    pts_2d.append(uvA)
-                    pts_3d_list.append(XA)
-                if uvB is not None:
-                    pts_2d.append(uvB)
-                    pts_3d_list.append(XB)
-            
-            if len(pts_2d) < 6:
-                print(f"    [WARN] Insufficient correspondences: {len(pts_2d)} < 6. Skipping.")
+            pts_2d, pts_3d_arr, telemetry = self._build_phase2_correspondences(
+                cid,
+                observations,
+                points_3d,
+                cam_params[seed_cam_i],
+                cam_params[seed_cam_j],
+            )
+
+            if len(pts_2d) < telemetry.prefilter_min_correspondences:
+                telemetry.pnp_correspondences = len(pts_2d)
+                self._label_phase2_confidence(telemetry)
+                self.last_phase2_telemetry[cid] = telemetry.to_dict()
+                print(
+                    f"    [WARN] Insufficient correspondences after prefilter: "
+                    f"{len(pts_2d)} < {telemetry.prefilter_min_correspondences}. Skipping."
+                )
                 continue
-            
-            pts_2d = np.array(pts_2d, dtype=np.float64)
-            pts_3d_arr = np.array(pts_3d_list, dtype=np.float64)
-            
+
+            telemetry.pnp_correspondences = int(len(pts_2d))
             print(f"    Correspondences: {len(pts_2d)}")
             
             K, _, _, _ = self._get_camera_intrinsics(cid, camera_settings)
-            # Solve PnP with frozen intrinsics (EPNP + ITERATIVE, like original)
-            success, rvec, tvec = cv2.solvePnP(
-                pts_3d_arr, pts_2d, K, dist_coeffs,
-                flags=cv2.SOLVEPNP_EPNP
+            success, rvec, tvec, pts_2d_refine, pts_3d_refine = self._solve_phase2_initial_pose(
+                cid,
+                pts_2d,
+                pts_3d_arr,
+                K,
+                dist_coeffs,
+                telemetry,
             )
-            
+
             if not success:
-                print(f"    [WARN] PnP (EPNP) failed for cam_{cid}. Skipping.")
+                mode = "RANSAC PnP" if self.config.phase2_ransac_enabled else "PnP (EPNP)"
+                self._label_phase2_confidence(telemetry)
+                self.last_phase2_telemetry[cid] = telemetry.to_dict()
+                print(f"    [WARN] {mode} failed for cam_{cid}. Skipping.")
                 continue
+
+            if self.config.phase2_ransac_enabled:
+                print(
+                    f"    RANSAC inliers: {telemetry.ransac_inliers}/{telemetry.pnp_correspondences} "
+                    f"({telemetry.ransac_inlier_ratio:.3f})"
+                )
             
             # Refine with ITERATIVE
             success, rvec, tvec = cv2.solvePnP(
-                pts_3d_arr, pts_2d, K, dist_coeffs,
+                pts_3d_refine, pts_2d_refine, K, dist_coeffs,
                 rvec, tvec, useExtrinsicGuess=True,
                 flags=cv2.SOLVEPNP_ITERATIVE
             )
             
             if not success:
-                print(f"    [WARN] PnP (ITERATIVE) failed for cam_{cid}. Falling back to EPNP result.")
-                # Re-run EPNP to restore good prior
-                success_epnp, rvec, tvec = cv2.solvePnP(
-                    pts_3d_arr, pts_2d, K, dist_coeffs,
-                    flags=cv2.SOLVEPNP_EPNP
-                )
-                if not success_epnp:
-                    print(f"    [WARN] EPNP fallback also failed for cam_{cid}. Skipping.")
-                    continue
+                print(f"    [WARN] PnP (ITERATIVE) failed for cam_{cid}. Falling back to initial pose result.")
             
             rvec = rvec.flatten()
             tvec = tvec.flatten()
             
-            # Compute initial reprojection error
-            pts_reproj, _ = cv2.projectPoints(pts_3d_arr, rvec, tvec, K, dist_coeffs)
-            pts_reproj = pts_reproj.reshape(-1, 2)
-            reproj_err_init = np.sqrt(np.mean(np.sum((pts_2d - pts_reproj)**2, axis=1)))
+            reproj_err_init = self._compute_phase2_reproj_rms(
+                pts_3d_refine, pts_2d_refine, rvec, tvec, K, dist_coeffs,
+            )
             
             print(f"    PnP result: RMS = {reproj_err_init:.2f}px")
             
@@ -1246,9 +1609,9 @@ class PinholeBootstrapP0:
             def residuals_cam(x):
                 r = x[:3].reshape(3, 1)
                 t = x[3:6].reshape(3, 1)
-                pts_proj, _ = cv2.projectPoints(pts_3d_arr, r, t, K, dist_coeffs)
+                pts_proj, _ = cv2.projectPoints(pts_3d_refine, r, t, K, dist_coeffs)
                 pts_proj = pts_proj.reshape(-1, 2)
-                return (pts_2d - pts_proj).flatten()
+                return (pts_2d_refine - pts_proj).flatten()
             
             result = least_squares(
                 residuals_cam, x0_cam,
@@ -1262,13 +1625,21 @@ class PinholeBootstrapP0:
             tvec_opt = result.x[3:6]
             
             # Compute final reprojection error
-            pts_reproj_opt, _ = cv2.projectPoints(pts_3d_arr, rvec_opt, tvec_opt, K, dist_coeffs)
-            pts_reproj_opt = pts_reproj_opt.reshape(-1, 2)
-            reproj_err_final = np.sqrt(np.mean(np.sum((pts_2d - pts_reproj_opt)**2, axis=1)))
+            reproj_err_final = self._compute_phase2_reproj_rms(
+                pts_3d_refine, pts_2d_refine, rvec_opt, tvec_opt, K, dist_coeffs,
+            )
+            telemetry.reproj_rms_px = float(reproj_err_final)
+            self._label_phase2_confidence(telemetry)
+            self.last_phase2_telemetry[cid] = telemetry.to_dict()
             
             print(f"    rvec: [{rvec_opt[0]:.4f}, {rvec_opt[1]:.4f}, {rvec_opt[2]:.4f}]")
             print(f"    tvec: [{tvec_opt[0]:.2f}, {tvec_opt[1]:.2f}, {tvec_opt[2]:.2f}]")
             print(f"    Reproj RMS: {reproj_err_init:.2f} -> {reproj_err_final:.2f}px")
+            if telemetry.prefilter_removed > 0 or telemetry.prefilter_starvation_fallback:
+                print(
+                    f"    Telemetry: kept={telemetry.prefilter_kept}, removed={telemetry.prefilter_removed}, "
+                    f"fallback={telemetry.prefilter_starvation_fallback}, confidence={telemetry.confidence_label}"
+                )
             
             cam_params[cid] = np.concatenate([rvec_opt, tvec_opt])
         
@@ -1610,48 +1981,119 @@ class PinholeBootstrapP0:
         observations: Dict[int, Dict[int, Tuple[np.ndarray, np.ndarray]]],
         camera_settings: Dict[int, dict],
         all_cam_ids: List[int],
-        progress_callback=None
+        progress_callback=None,
+        ranked_seed_pairs: Optional[List[Tuple[int, int]]] = None,
     ) -> Tuple[Dict[int, np.ndarray], dict]:
         """
         Run full P0 bootstrap: Phase 1 (8-Point + BA) + Phase 2 (PnP) + Phase 3 (Global BA).
         
         All phases use frozen intrinsics (fixed focal length).
         """
-        # Phase 1: Calibrate best pair
-        params_i, params_j, report = self.run(
-            cam_i, cam_j, observations, camera_settings, progress_callback=progress_callback
-        )
-        
-        cam_params = {
-            cam_i: params_i,
-            cam_j: params_j,
-        }
-        
-        # Triangulate 3D points
-        print(f"\n[P0] Triangulating 3D points for Phase 2...")
-        if progress_callback:
-            try:
-                progress_callback("Use PinHole model to initialize camera parameters...", -1, 0, 0, 0)
-            except:
-                pass
+        seed_pair_attempts = self._build_seed_pair_attempts(cam_i, cam_j, ranked_seed_pairs)
+        total_attempts = 1
+        if len(seed_pair_attempts) > 1 and int(self.config.phase2_pair_fallback_max_retries) > 0:
+            total_attempts = min(
+                len(seed_pair_attempts),
+                int(self.config.phase2_pair_fallback_max_retries) + 1,
+            )
 
-        points_3d = self.triangulate_all_points(
-            cam_i, cam_j, params_i, params_j, observations, camera_settings
-        )
-        report['points_3d'] = points_3d
-        print(f"  Triangulated {len(points_3d)} frames")
-        
-        # Phase 2: Calibrate remaining cameras
-        if progress_callback:
-            try:
-                progress_callback("Use PinHole model to initialize camera parameters...", -1, 0, 0, 0)
-            except:
-                pass
-        
-        cam_params = self.run_phase2(
-            cam_params, observations, points_3d, camera_settings, all_cam_ids
-        )
-        
+        best_attempt = None
+        chosen_attempt = None
+
+        for attempt_index, seed_pair in enumerate(seed_pair_attempts[:total_attempts]):
+            attempt_cam_i, attempt_cam_j = seed_pair
+            if attempt_index > 0:
+                print(
+                    f"\n[P0] Retrying bootstrap with ranked seed pair #{attempt_index + 1}: "
+                    f"({attempt_cam_i}, {attempt_cam_j})"
+                )
+
+            params_i, params_j, report = self.run(
+                attempt_cam_i,
+                attempt_cam_j,
+                observations,
+                camera_settings,
+                progress_callback=progress_callback,
+            )
+
+            cam_params = {
+                attempt_cam_i: params_i,
+                attempt_cam_j: params_j,
+            }
+
+            print(f"\n[P0] Triangulating 3D points for Phase 2...")
+            if progress_callback:
+                try:
+                    progress_callback("Use PinHole model to initialize camera parameters...", -1, 0, 0, 0)
+                except:
+                    pass
+
+            points_3d = self.triangulate_all_points(
+                attempt_cam_i, attempt_cam_j, params_i, params_j, observations, camera_settings
+            )
+            report['points_3d'] = points_3d
+            print(f"  Triangulated {len(points_3d)} frames")
+
+            if progress_callback:
+                try:
+                    progress_callback("Use PinHole model to initialize camera parameters...", -1, 0, 0, 0)
+                except:
+                    pass
+
+            cam_params = self.run_phase2(
+                cam_params, observations, points_3d, camera_settings, all_cam_ids
+            )
+            phase2_telemetry = dict(self.last_phase2_telemetry)
+            if 'p0_telemetry' in report:
+                report['p0_telemetry']['phase2_cameras'] = phase2_telemetry
+
+            phase2_rms_max_px, phase2_rms_median_px = self._summarize_phase2_rms(phase2_telemetry)
+            report['phase2_rms_max_px'] = phase2_rms_max_px
+            report['phase2_rms_median_px'] = phase2_rms_median_px
+
+            attempt_state = {
+                'cam_i': attempt_cam_i,
+                'cam_j': attempt_cam_j,
+                'cam_params': cam_params,
+                'report': report,
+                'points_3d': points_3d,
+                'phase2_telemetry': phase2_telemetry,
+                'phase2_rms_max_px': phase2_rms_max_px,
+            }
+
+            candidate_rms = phase2_rms_max_px if phase2_rms_max_px is not None else float('inf')
+            best_rms = (
+                best_attempt['phase2_rms_max_px']
+                if best_attempt is not None and best_attempt['phase2_rms_max_px'] is not None
+                else float('inf')
+            )
+            if best_attempt is None or candidate_rms < best_rms:
+                best_attempt = attempt_state
+
+            if self._should_retry_seed_pair_from_phase2_rms(phase2_rms_max_px, attempt_index, total_attempts):
+                print(
+                    f"[P0] Phase-2 RMS gate rejected seed pair ({attempt_cam_i}, {attempt_cam_j}): "
+                    f"max RMS {phase2_rms_max_px:.2f}px > "
+                    f"threshold {float(self.config.phase2_pair_fallback_rms_threshold_px):.2f}px"
+                )
+                continue
+
+            chosen_attempt = attempt_state
+            break
+
+        if chosen_attempt is None:
+            chosen_attempt = best_attempt
+
+        if chosen_attempt is None:
+            raise RuntimeError("[P0] Bootstrap attempt selection failed unexpectedly")
+
+        cam_i = chosen_attempt['cam_i']
+        cam_j = chosen_attempt['cam_j']
+        cam_params = chosen_attempt['cam_params']
+        report = chosen_attempt['report']
+        points_3d = chosen_attempt['points_3d']
+        self.last_phase2_telemetry = dict(chosen_attempt['phase2_telemetry'])
+
         # Phase 3: Global BA with all cameras
         if progress_callback:
             try:
