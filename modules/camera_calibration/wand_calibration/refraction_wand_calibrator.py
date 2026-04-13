@@ -1,3 +1,4 @@
+# pyright: reportMissingImports=false, reportAttributeAccessIssue=false, reportPossiblyUnboundVariable=false
 import os
 import builtins
 import numpy as np
@@ -408,6 +409,7 @@ class PlaneInitializer:
         X_A_list=None,
         X_B_list=None,
         active_cam_ids=None,
+        camera_centers_override=None,
     ):
         if active_cam_ids is None:
             active_cam_ids = list(cam_params.keys())
@@ -452,10 +454,17 @@ class PlaneInitializer:
 
             centers = {}
             for cid in cams_used:
-                p = cam_params[cid]
-                rvec, tvec = p[0:3], p[3:6]
-                R, _ = cv2.Rodrigues(rvec)
-                centers[cid] = -R.T @ tvec
+                override_center = None if camera_centers_override is None else camera_centers_override.get(cid)
+                if override_center is not None:
+                    center_vec = np.asarray(override_center, dtype=np.float64)
+                    if center_vec.shape != (3,) or not np.all(np.isfinite(center_vec)):
+                        raise RuntimeError(f"Win {wid}: invalid camera_centers_override for cam {cid}")
+                    centers[cid] = center_vec
+                else:
+                    p = cam_params[cid]
+                    rvec, tvec = p[0:3], p[3:6]
+                    R, _ = cv2.Rodrigues(rvec)
+                    centers[cid] = -R.T @ tvec
 
             C_mean = np.mean([centers[c] for c in cams_used], axis=0)
             if verbose:
@@ -466,60 +475,45 @@ class PlaneInitializer:
 
             X_arr = np.asarray(X_mids, dtype=np.float64)
 
-            # Normal should be parallel to optical axis: single cam axis or sign-aligned mean axis.
-            optical_axes = []
-            for cid in cams_used:
-                p = cam_params[cid]
-                R, _ = cv2.Rodrigues(p[0:3])
-                axis = (R.T @ np.array([0.0, 0.0, 1.0], dtype=np.float64)).reshape(3,)
-                na = np.linalg.norm(axis)
-                if na > 1e-12:
-                    optical_axes.append(axis / na)
-            if not optical_axes:
-                raise RuntimeError(f"Win {wid}: failed to compute optical axis from mapped cameras")
-
-            ref_axis = np.asarray(optical_axes[0], dtype=np.float64)
-            aligned_axes = []
-            for axis in optical_axes:
-                a = np.asarray(axis, dtype=np.float64)
-                if np.dot(a, ref_axis) < 0.0:
-                    a = -a
-                aligned_axes.append(a)
-            n_win = np.mean(np.asarray(aligned_axes, dtype=np.float64), axis=0)
+            X_centroid = np.mean(X_arr, axis=0)
+            n_win = X_centroid - C_mean
             nn = np.linalg.norm(n_win)
             if nn < 1e-12:
-                raise RuntimeError(f"Win {wid}: degenerate optical-axis average")
+                raise RuntimeError(f"Win {wid}: degenerate camera-to-object direction")
             n_win = n_win / nn
 
-            # Robust plane-point initialization from all 3D points.
             dists = np.linalg.norm(X_arr - C_mean.reshape(1, 3), axis=1)
             if dists.size == 0:
                 raise RuntimeError(f"Win {wid}: no valid 3D points for midpoint initialization")
-            plane_pt = np.median(X_arr, axis=0)
+            depth_med = float(np.median(dists))
+            media = window_media.get(wid, {})
+            n_obj = float(media.get('n_object', media.get('n3', 1.333)))
+            d0_mm = depth_med / n_obj
+            plane_pt = C_mean + d0_mm * n_win
             if not np.all(np.isfinite(plane_pt)):
                 raise RuntimeError(
-                    f"Win {wid}: plane_pt initialization failed — non-finite median of {len(X_arr)} points"
+                    f"Win {wid}: plane_pt initialization failed — non-finite camera-ray projection"
                 )
-            depth_med = float(np.median(dists))
-            d0_mm = 0.5 * depth_med
-            thick_mm = window_media.get(wid, {}).get('thickness', 10.0)
+            thick_mm = media.get('thickness', 10.0)
 
             if verbose:
-                print(f"  plane_pt (median init) = {plane_pt.round(2)}")
-                print(f"  depth_med = {depth_med:.1f} mm, midpoint d0 = {d0_mm:.1f} mm")
-                print(f"  n_win (axis-parallel init) = {n_win.round(4)}")
+                print(f"  X_centroid = {X_centroid.round(2)}")
+                print(f"  plane_pt (camera-ray init) = {plane_pt.round(2)}")
+                print(f"  depth_med = {depth_med:.1f} mm, refractive d0 = {d0_mm:.1f} mm (n_obj={n_obj:.3f})")
+                print(f"  n_win (camera->object init) = {n_win.round(4)}")
 
             def compute_score(n_test):
+                plane_pt_test = C_mean + d0_mm * np.asarray(n_test, dtype=np.float64)
                 cams_ok = 0
                 for cid in cams_used:
-                    s = np.dot(n_test, centers[cid] - plane_pt)
+                    s = np.dot(n_test, centers[cid] - plane_pt_test)
                     if s < 0:
                         cams_ok += 1
 
                 obj_ok = 0
                 if X_mids:
                     for X_mid in X_mids[:200]:
-                        sX = np.dot(n_test, X_mid - plane_pt)
+                        sX = np.dot(n_test, X_mid - plane_pt_test)
                         if sX > 0:
                             obj_ok += 1
                     obj_pct = 100.0 * obj_ok / min(len(X_mids), 200)
@@ -549,12 +543,14 @@ class PlaneInitializer:
                     print(f"  [WARN] Using -n_win (all cams OK, but only {obj_pct_neg:.1f}% objects object-side)")
             else:
                 if cams_ok_pos >= cams_ok_neg:
-                    n_choice, cams_ok_choice = n_win, cams_ok_pos
+                    cams_ok_choice = cams_ok_pos
                 else:
                     n_win = -n_win
                     cams_ok_choice = cams_ok_neg
                 print(f"  [ERROR] Cannot satisfy all cams! Best: {cams_ok_choice}/{len(cams_used)} cams camera-side")
                 print(f"  This may indicate: (1) cam_to_window mapping error, or (2) cameras on opposite sides of window")
+
+            plane_pt = C_mean + d0_mm * n_win
 
             print(f"\n[WIN_SANITY] Win {wid}: s = dot(n_win, P - plane_pt)")
 
