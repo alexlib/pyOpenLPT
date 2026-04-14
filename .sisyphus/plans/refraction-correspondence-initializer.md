@@ -231,7 +231,7 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
 > Implementation + Test = ONE task. Never separate.
 > EVERY task MUST have: Agent Profile + Parallelization + QA Scenarios.
 
-- [ ] 1. Add a pure analytical solver for fixed-normal plane offset `d` from 2D correspondences
+- [x] 1. Add a pure analytical solver for fixed-normal plane offset `d` from 2D correspondences
 
   **What to do**: Create `modules/camera_calibration/wand_calibration/plane_d_solver.py` (or place an equivalently scoped function in an existing geometry module) with pure, testable helpers that do not mutate BA state. Implement `solve_plane_d_from_correspondences(...)` for a fixed `plane_n`, known thickness, and multi-view 2D endpoint correspondences. The solver must: (a) compute incident rays `u_ij` from `K`, `rvec`, and `tvec`; (b) compute interface intersections `Q_ij(d)` analytically; (c) apply Python Snell/refraction steps for the two-interface plate model; (d) assemble one scalar linear equation `A_i d = b_i` per valid multi-view correspondence; and (e) solve `A d = b` with least squares to produce `d_solved`, diagnostics, and validity flags.
   **Must NOT do**: Do not touch `RefractiveBAOptimizer`, C++ camera code, or any export path. Do not change or re-estimate `plane_n` in this plan. Do not refine thickness. Do not read external case files inside the solver. Do not accept a solve when fewer than 2 cameras observe a correspondence or when the linear system is rank-deficient / ill-conditioned.
@@ -252,8 +252,8 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
   - External: `https://openaccess.thecvf.com/content_cvpr_2014/html/Chen_Two-View_Camera_Housing_2014_CVPR_paper.html` - correspondence-based literature inspiration; use only as motivation, not as a direct algorithm port
 
   **Acceptance Criteria** (agent-executable only):
-  - [ ] `modules/camera_calibration/wand_calibration/plane_d_solver.py` exists and exposes a pure `solve_plane_d_from_correspondences(...)` API.
-  - [ ] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py -v -k synthetic` passes.
+  - [x] `modules/camera_calibration/wand_calibration/plane_d_solver.py` exists and exposes a pure `solve_plane_d_from_correspondences(...)` API.
+  - [x] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py -v -k synthetic` passes.
 
   **QA Scenarios** (MANDATORY - task incomplete without these):
   ```
@@ -272,7 +272,7 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
 
   **Commit**: YES | Message: `feat(wand-cal): add analytical plane-d solver` | Files: [`modules/camera_calibration/wand_calibration/plane_d_solver.py`, `tests/test_plane_d_solver.py`]
 
-- [ ] 2. Add synthetic unit tests for `d` recovery accuracy, conditioning, and fallback conditions
+- [x] 2. Add synthetic unit tests for `d` recovery accuracy, conditioning, and fallback conditions
 
   **What to do**: Create `tests/test_plane_d_solver.py` with explicit synthetic fixtures covering (a) 2-camera known-plane recovery, (b) 3+ camera overdetermined recovery, (c) near-parallel / ill-conditioned rays, and (d) insufficient multi-view overlap. Generate 2D correspondences from known synthetic geometry, run `solve_plane_d_from_correspondences(...)`, and verify returned `d` plus validity diagnostics.
   **Must NOT do**: Do not instantiate full calibration runs here. Do not depend on `J:` assets in these unit tests. Do not assert only qualitative improvement; assert explicit numerical `d` error thresholds.
@@ -290,8 +290,8 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
   - Math Contract: each valid correspondence contributes one scalar equation `A_i d = b_i`; solve with `np.linalg.lstsq`
 
   **Acceptance Criteria** (agent-executable only):
-  - [ ] Unit tests cover positive and negative `d`-solver cases without relying on external datasets.
-  - [ ] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py -v -k synthetic` passes.
+  - [x] Unit tests cover positive and negative `d`-solver cases without relying on external datasets.
+  - [x] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py -v -k synthetic` passes.
 
   **QA Scenarios** (MANDATORY - task incomplete without these):
   ```
@@ -310,7 +310,7 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
 
   **Commit**: YES | Message: `test(wand-cal): cover analytical plane-d solver` | Files: [`tests/test_plane_d_solver.py`]
 
-- [ ] 3. Add solver validation and fallback gating for analytical `d` vs legacy midpoint depth
+- [x] 3. Add solver validation and fallback gating for analytical `d` vs legacy midpoint depth
 
   **What to do**: Extend `plane_d_solver.py` with validation and fallback gating utilities that compare the analytical `d_solved` against the legacy midpoint-depth seed. The gate must preserve the current `plane_n`, compute `plane_pt = A + d * plane_n`, and reject the analytical result if any active camera violates the camera-side rule, if the linear system is ill-conditioned, or if `d_solved` is non-finite / physically implausible. Keep the legacy midpoint-depth seed as the fallback.
   **Must NOT do**: Do not call `RefractiveBAOptimizer.optimize()`. Do not require changing `RefractiveBAConfig`. Do not use a full external harness here.
@@ -330,9 +330,9 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
   - API/Type: `modules/camera_calibration/wand_calibration/refractive_geometry.py:1233-1256` - signed-depth / camera-side constraints the solved plane must satisfy
 
   **Acceptance Criteria** (agent-executable only):
-  - [ ] Validation utilities return comparable diagnostics for analytical `d` and legacy midpoint depth while leaving `plane_n` unchanged.
-  - [ ] Candidate acceptance requires all active cameras to remain camera-side, finite solved `d`, and a non-degenerate linear solve; otherwise legacy wins.
-  - [ ] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py -v -k fallback` passes.
+  - [x] Validation utilities return comparable diagnostics for analytical `d` and legacy midpoint depth while leaving `plane_n` unchanged.
+  - [x] Candidate acceptance requires all active cameras to remain camera-side, finite solved `d`, and a non-degenerate linear solve; otherwise legacy wins.
+  - [x] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py -v -k fallback` passes.
 
   **QA Scenarios** (MANDATORY - task incomplete without these):
   ```
@@ -351,7 +351,7 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
 
   **Commit**: YES | Message: `feat(wand-cal): add plane-d fallback gating` | Files: [`modules/camera_calibration/wand_calibration/plane_d_solver.py`, `tests/test_plane_d_solver.py`]
 
-- [ ] 4. Integrate branch-and-compare selection into the existing Stage-0 plane initializer seam
+- [x] 4. Integrate branch-and-compare selection into the existing Stage-0 plane initializer seam
 
   **What to do**: Modify `modules/camera_calibration/wand_calibration/refraction_wand_calibrator.py` so `PlaneInitializer.init_window_planes_from_cameras(...)` keeps the current normal heuristic, replaces the legacy `d0_mm = median_depth / n_object` seed with `solve_plane_d_from_correspondences(...)`, and falls back to the legacy midpoint-depth seed when the analytical solve is invalid. Preserve the existing function signature and returned structure. Add deterministic logs of the form `[PLANE_INIT] Win {wid}: d_midpoint=... d_solved=... chose=... fallback_reason=...`.
   **Must NOT do**: Do not move initialization into BA. Do not change `_init_cams_cpp_in_memory`, `RefractiveBAOptimizer`, or any export logic. Do not remove the current midpoint path; it is the fallback.
@@ -371,9 +371,9 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
   - Test: `tests/test_plane_pipeline.py:624-679` - seam already treated as live initializer source in trace tests
 
   **Acceptance Criteria** (agent-executable only):
-  - [ ] `PlaneInitializer.init_window_planes_from_cameras(...)` remains callable with the same signature and returns the same key structure.
-  - [ ] The initializer emits `[PLANE_INIT]` winner diagnostics for each initialized window including both `d_midpoint` and `d_solved` when available.
-  - [ ] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py tests/test_plane_pipeline.py -v -k integration` passes.
+  - [x] `PlaneInitializer.init_window_planes_from_cameras(...)` remains callable with the same signature and returns the same key structure.
+  - [x] The initializer emits `[PLANE_INIT]` winner diagnostics for each initialized window including both `d_midpoint` and `d_solved` when available.
+  - [x] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py tests/test_plane_pipeline.py -v -k integration` passes.
 
   **QA Scenarios** (MANDATORY - task incomplete without these):
   ```
@@ -392,7 +392,7 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
 
   **Commit**: YES | Message: `feat(wand-cal): integrate analytical plane-d init` | Files: [`modules/camera_calibration/wand_calibration/refraction_wand_calibrator.py`, `modules/camera_calibration/wand_calibration/plane_d_solver.py`, `tests/test_plane_d_solver.py`, `tests/test_plane_pipeline.py`]
 
-- [ ] 5. Add seam regression coverage in `tests/test_plane_pipeline.py` for default-on selection and fallback metadata
+- [x] 5. Add seam regression coverage in `tests/test_plane_pipeline.py` for default-on selection and fallback metadata
 
   **What to do**: Extend `tests/test_plane_pipeline.py` with focused tests that confirm the Stage-0 trace continues to treat the live initializer as authoritative, and that the new Stage-0 metadata includes solved `d`, legacy `d_midpoint`, selected source, and fallback reason when the analytical solver wins or falls back. Reuse the existing monkeypatch seam rather than invoking the full case harness.
   **Must NOT do**: Do not rewrite unrelated trace tests. Do not hard-code `J:` case dependencies into this file. Do not weaken existing assertions about `INIT` source and live initializer output.
@@ -410,9 +410,9 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
   - Pattern: `tests/test_plane_pipeline.py:682-694` - trace transform assertions that must not regress when init metadata grows
 
   **Acceptance Criteria** (agent-executable only):
-  - [ ] Existing trace tests still pass or are updated only where new metadata is intentionally added.
-  - [ ] New seam regression tests verify winner/fallback metadata without requiring external assets.
-  - [ ] `conda run -n OpenLPT python -m pytest tests/test_plane_pipeline.py -v -k correspondence` passes.
+  - [x] Existing trace tests still pass or are updated only where new metadata is intentionally added.
+  - [x] New seam regression tests verify winner/fallback metadata without requiring external assets.
+  - [x] `conda run -n OpenLPT python -m pytest tests/test_plane_pipeline.py -v -k correspondence` passes.
 
   **QA Scenarios** (MANDATORY - task incomplete without these):
   ```
@@ -431,7 +431,7 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
 
   **Commit**: YES | Message: `test(wand-cal): extend plane trace init metadata` | Files: [`tests/test_plane_pipeline.py`]
 
-- [ ] 6. Add a `case_011` verification helper test that runs the synthetic harness through `run_one_case(...)`
+- [x] 6. Add a `case_011` verification helper test that runs the synthetic harness through `run_one_case(...)`
 
   **What to do**: Add an end-to-end integration test that imports `run_one_case` from `J:\Refraction_test\test_script\run_calibration_worker.py`, runs `case_011`, captures the returned metrics plus generated log path, and asserts the non-regression thresholds and Stage-0 diagnostics required by this plan. Parse the generated log for `[PLANE_INIT]` diagnostics and any frame-count / side-check summaries needed by the assertions. Guard the test with `pytest.skip` when the external harness or case directory is unavailable.
   **Must NOT do**: Do not modify `J:` harness files. Do not depend on batch-only `run_robustness.py` for single-case execution. Do not use GT pose error metrics (`r_err_mean_deg`) as the primary acceptance signal because the existing baseline is inconsistent there. Do not require direct `d_gt` comparison unless the executor also adds an explicit frame-transform derivation from case metadata into the bootstrap-aligned frame.
@@ -450,9 +450,9 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
   - Pattern: `tests/test_plane_pipeline.py` - existing style for optional external-asset tests with guardable setup
 
   **Acceptance Criteria** (agent-executable only):
-  - [ ] Test skips cleanly when `J:\Refraction_test\case_011` or `run_calibration_worker.py` is missing.
-  - [ ] When available, the test asserts `success=True`, `ray_mean_mm <= 0.002`, `len_mean_mm <= 0.005`, presence of `[PLANE_INIT]` in the log, and passing Stage-0 side-check diagnostics parsed from the log.
-  - [ ] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py -v -k case011` passes.
+  - [x] Test skips cleanly when `J:\Refraction_test\case_011` or `run_calibration_worker.py` is missing.
+  - [x] When available, the test asserts `success=True`, `ray_mean_mm <= 0.002`, `len_mean_mm <= 0.005`, presence of `[PLANE_INIT]` in the log, and passing Stage-0 side-check diagnostics parsed from the log.
+  - [x] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py -v -k case011` passes.
 
   **QA Scenarios** (MANDATORY - task incomplete without these):
   ```
@@ -471,7 +471,7 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
 
   **Commit**: YES | Message: `test(wand-cal): add case011 plane-d regression` | Files: [`tests/test_plane_d_solver.py`]
 
-- [ ] 7. Add a forced-legacy comparison path for automated non-regression against the old initializer
+- [x] 7. Add a forced-legacy comparison path for automated non-regression against the old initializer
 
   **What to do**: Introduce a minimal, local control surface that allows tests to run the legacy midpoint-only initializer path explicitly so the new default-on behavior can be compared against the old baseline in automation. Implement this as an internal environment override `OPENLPT_REFRACTION_PLANE_INIT_MODE` with allowed values `auto` (default) and `legacy`, read inside `PlaneInitializer.init_window_planes_from_cameras(...)`. Production behavior must remain `auto`.
   **Must NOT do**: Do not make legacy mode the default. Do not require users to toggle it in normal operation. Do not expose a sprawling public API surface just for the test.
@@ -489,8 +489,8 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
   - Test: `tests/test_plane_d_solver.py` - use this file to compare default-on vs forced-legacy results
 
   **Acceptance Criteria** (agent-executable only):
-  - [ ] Tests can force the legacy midpoint-only path without changing default production behavior.
-  - [ ] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py -v -k legacy_compare` passes.
+  - [x] Tests can force the legacy midpoint-only path without changing default production behavior.
+  - [x] `conda run -n OpenLPT python -m pytest tests/test_plane_d_solver.py -v -k legacy_compare` passes.
 
   **QA Scenarios** (MANDATORY - task incomplete without these):
   ```
@@ -509,7 +509,7 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
 
   **Commit**: YES | Message: `test(wand-cal): add legacy plane-d comparison path` | Files: [`modules/camera_calibration/wand_calibration/refraction_wand_calibrator.py`, `tests/test_plane_d_solver.py`]
 
-- [ ] 8. Run the full verification set and record baseline-vs-new acceptance evidence
+- [x] 8. Run the full verification set and record baseline-vs-new acceptance evidence
 
   **What to do**: Execute the planned verification commands in the `OpenLPT` conda environment, capture outputs, and confirm the implementation meets all acceptance thresholds. Review generated logs for `case_011` to confirm `[PLANE_INIT]`, Stage-0 camera/object-side checks, and non-regressed final ray/length metrics. If any threshold fails, fix the implementation before completion.
   **Must NOT do**: Do not claim success without command output. Do not use `python` from an unknown environment; use `conda run -n OpenLPT python ...` per repo rules. Do not skip the `case_011` log inspection.
@@ -528,10 +528,10 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
   - External: `J:/Refraction_test/test_results/logs/robustness/case_011.log` - inspect for `[PLANE_INIT]`, `WIN_SANITY`, and final diagnostics
 
   **Acceptance Criteria** (agent-executable only):
-  - [ ] All planned pytest commands pass.
-  - [ ] `run_one_case(...)` returns `success=True`.
-  - [ ] `ray_mean_mm <= 0.002` and `len_mean_mm <= 0.005`.
-  - [ ] `case_011.log` contains `[PLANE_INIT]` plus passing Stage-0 and final plane-side diagnostics.
+  - [x] All planned pytest commands pass.
+  - [x] `run_one_case(...)` returns `success=True`.
+  - [x] `ray_mean_mm <= 0.002` and `len_mean_mm <= 0.005`.
+  - [x] `case_011.log` contains `[PLANE_INIT]` plus passing Stage-0 and final plane-side diagnostics.
 
   **QA Scenarios** (MANDATORY - task incomplete without these):
   ```
@@ -554,10 +554,10 @@ Wave 2: Stage-0 integration, seam regression tests, and `case_011` verification
 > 4 review agents run in PARALLEL. ALL must APPROVE. Present consolidated results to user and get explicit "okay" before completing.
 > **Do NOT auto-proceed after verification. Wait for user's explicit approval before marking work complete.**
 > **Never mark F1-F4 as checked before getting user's okay.** Rejection or user feedback -> fix -> re-run -> present again -> wait for okay.
-- [ ] F1. Plan Compliance Audit — oracle
-- [ ] F2. Code Quality Review — unspecified-high
-- [ ] F3. Real Manual QA — unspecified-high (+ playwright if UI)
-- [ ] F4. Scope Fidelity Check — deep
+- [x] F1. Plan Compliance Audit — oracle
+- [x] F2. Code Quality Review — unspecified-high
+- [x] F3. Real Manual QA — unspecified-high (+ playwright if UI)
+- [x] F4. Scope Fidelity Check — deep
 
 ## Commit Strategy
 - Commit 1: `test(wand-cal): add analytical plane-d solver tests`

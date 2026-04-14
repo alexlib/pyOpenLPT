@@ -410,6 +410,7 @@ class PlaneInitializer:
         X_B_list=None,
         active_cam_ids=None,
         camera_centers_override=None,
+        observations=None,
     ):
         if active_cam_ids is None:
             active_cam_ids = list(cam_params.keys())
@@ -550,7 +551,40 @@ class PlaneInitializer:
                 print(f"  [ERROR] Cannot satisfy all cams! Best: {cams_ok_choice}/{len(cams_used)} cams camera-side")
                 print(f"  This may indicate: (1) cam_to_window mapping error, or (2) cameras on opposite sides of window")
 
-            plane_pt = C_mean + d0_mm * n_win
+            # --- Analytical d solve (default-on, auto fallback) ---
+            init_mode = os.environ.get('OPENLPT_REFRACTION_PLANE_INIT_MODE', 'auto')
+            d_analytical_result = None
+            d_chosen = d0_mm
+            chose = 'midpoint'
+            fallback_reason_log = None
+
+            if init_mode != 'legacy' and observations is not None:
+                from .plane_d_solver import solve_plane_d_from_correspondences
+                d_analytical_result = solve_plane_d_from_correspondences(
+                    cam_params=cam_params,
+                    observations=observations,
+                    plane_n=n_win,
+                    window_media=media,
+                    cam_to_window=cam_to_window,
+                    wid=wid,
+                    A_anchor=C_mean,
+                    d_midpoint=d0_mm,
+                    active_cam_ids=cams_used,
+                    verbose=verbose,
+                )
+                if d_analytical_result['accepted']:
+                    d_chosen = d_analytical_result['d_solved']
+                    chose = 'analytical'
+                else:
+                    fallback_reason_log = d_analytical_result['fallback_reason']
+                    chose = 'midpoint'
+            elif init_mode == 'legacy':
+                chose = 'midpoint_legacy_forced'
+
+            d_solved_log = d_analytical_result['d_solved'] if d_analytical_result else float('nan')
+            print(f"[PLANE_INIT] Win {wid}: d_midpoint={d0_mm:.3f} d_solved={d_solved_log:.3f} chose={chose} fallback_reason={fallback_reason_log}")
+
+            plane_pt = C_mean + d_chosen * n_win
 
             print(f"\n[WIN_SANITY] Win {wid}: s = dot(n_win, P - plane_pt)")
 
@@ -587,7 +621,7 @@ class PlaneInitializer:
             print(f"\n  n_win (final) = {n_win.round(4)}")
             print(f"  plane_pt (final) = {plane_pt.round(2)}")
             if verbose:
-                print(f"  Plane at {d0_mm:.1f}mm from cameras, objects at ~{depth_med:.1f}mm")
+                print(f"  Plane at {d_chosen:.1f}mm from cameras, objects at ~{depth_med:.1f}mm")
 
         return window_planes
 
@@ -990,7 +1024,8 @@ class RefractiveWandCalibrator:
 
 
     def _init_window_planes_from_cameras(self, cam_params, cam_to_window, window_media, err_px, 
-                                          X_A_list=None, X_B_list=None, active_cam_ids=None):
+                                          X_A_list=None, X_B_list=None, active_cam_ids=None,
+                                          observations=None):
         """
         Initialize window planes using cameras assigned to each window.
         
@@ -1009,6 +1044,7 @@ class RefractiveWandCalibrator:
             X_A_list: dict[fid] -> 3D point A from bootstrap (scaled, in mm)
             X_B_list: dict[fid] -> 3D point B from bootstrap (scaled, in mm)
             active_cam_ids: list of camera IDs that are active (will be used for ray-building)
+            observations: {fid: {cid: (uvA, uvB)}} or None — passed to analytical d solver
         
         Returns:
             window_planes: dict[wid] -> {'plane_pt': np.array, 'plane_n': np.array}
@@ -1022,6 +1058,7 @@ class RefractiveWandCalibrator:
             X_A_list=X_A_list,
             X_B_list=X_B_list,
             active_cam_ids=active_cam_ids,
+            observations=observations,
         )
 
     def _debug_frame_consistency_check(
@@ -2005,7 +2042,7 @@ class RefractiveWandCalibrator:
             bootstrap_cache_path = None
         
         if not cam_params_raw:
-            # Get initial focal length
+            observations_for_init = None
             initial_focal = getattr(self.base, 'initial_focal', 5000.0)
             
             # Try to load from cache first
@@ -2059,6 +2096,7 @@ class RefractiveWandCalibrator:
 
                 # Prepare observations for P0
                 observations = self._prepare_observations_for_bootstrap(cam_to_window)
+                observations_for_init = observations
                 # Task 1: Fix W/H definition. image_size is usually (H, W) from numpy shape.
                 camera_settings = getattr(self.base, 'camera_settings', None) or {}
                 if not camera_settings:
@@ -2209,7 +2247,8 @@ class RefractiveWandCalibrator:
             print("\n[Refractive][STAGE 0] Window Plane Initialization")
             self.window_planes = self._init_window_planes_from_cameras(
                 cam_params, cam_to_window, window_media, err_px,
-                X_A_list=X_A_scaled, X_B_list=X_B_scaled, active_cam_ids=dataset['cam_ids']
+                X_A_list=X_A_scaled, X_B_list=X_B_scaled, active_cam_ids=dataset['cam_ids'],
+                observations=observations_for_init,
             )
 
             # [AUDIT] Estimate Radii from Bootstrap (Step 1)

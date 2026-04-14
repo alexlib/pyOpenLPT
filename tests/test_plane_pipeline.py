@@ -722,6 +722,76 @@ def test_run_trace_transforms_live_init_points_into_world_center_frame(tmp_path,
     assert init_stage["metadata"]["init_inputs"]["points_source"] == "bundle_cache points_3d rigid-aligned into case_meta C_world frame"
 
 
+def test_run_trace_correspondence_solver_accepted_produces_valid_init_stage(tmp_path, monkeypatch):
+    """Verify pipeline handles plane initializer when correspondence solver is accepted (chose='analytical')."""
+    live_init_plane = {
+        "plane_pt": np.array([11.5, 0.0, 0.0], dtype=np.float64),
+        "plane_n": np.array([1.0, 0.0, 0.0], dtype=np.float64),
+        "thick_mm": 2.0,
+        "initialized": True,
+    }
+    bundle_plane = {
+        "plane_pt": [0.0, 4.0, 0.0],
+        "plane_n": [0.0, 1.0, 0.0],
+    }
+    _patch_trace_inputs_for_live_init(monkeypatch, live_init_plane=live_init_plane, bundle_plane=bundle_plane)
+
+    manifest = case_026_plane_debug_loop.run_trace(results_dir=tmp_path)
+    init_stage = _read_json(Path(manifest["artifacts"]["INIT"]))
+
+    assert init_stage["source"] == "live_init_window_planes_from_cameras"
+    np.testing.assert_allclose(init_stage["windows"]["0"]["plane_pt"], [11.5, 0.0, 0.0], atol=1e-12, rtol=0.0)
+    np.testing.assert_allclose(init_stage["windows"]["0"]["plane_n"], [1.0, 0.0, 0.0], atol=1e-12, rtol=0.0)
+    assert init_stage["windows"]["0"]["thick_mm"] == 2.0
+
+
+def test_run_trace_correspondence_fallback_to_midpoint_produces_valid_init_stage(tmp_path, monkeypatch):
+    """Verify pipeline handles plane initializer when correspondence solver falls back to midpoint."""
+    live_init_plane = {
+        "plane_pt": np.array([12.0, 0.0, 0.0], dtype=np.float64),
+        "plane_n": np.array([1.0, 0.0, 0.0], dtype=np.float64),
+        "thick_mm": 2.0,
+        "initialized": True,
+    }
+    bundle_plane = {
+        "plane_pt": [0.0, 4.0, 0.0],
+        "plane_n": [0.0, 1.0, 0.0],
+    }
+    _patch_trace_inputs_for_live_init(monkeypatch, live_init_plane=live_init_plane, bundle_plane=bundle_plane)
+
+    manifest = case_026_plane_debug_loop.run_trace(results_dir=tmp_path)
+    init_stage = _read_json(Path(manifest["artifacts"]["INIT"]))
+
+    assert init_stage["source"] == "live_init_window_planes_from_cameras"
+    np.testing.assert_allclose(init_stage["windows"]["0"]["plane_pt"], [12.0, 0.0, 0.0], atol=1e-12, rtol=0.0)
+    np.testing.assert_allclose(init_stage["windows"]["0"]["plane_n"], [1.0, 0.0, 0.0], atol=1e-12, rtol=0.0)
+    assert init_stage["windows"]["0"]["thick_mm"] == 2.0
+
+
+def test_run_trace_correspondence_init_metadata_contract(tmp_path, monkeypatch):
+    """Verify INIT stage artifact contains expected metadata keys when using live correspondence initializer."""
+    live_init_plane = {
+        "plane_pt": np.array([10.0, 0.0, 0.0], dtype=np.float64),
+        "plane_n": np.array([1.0, 0.0, 0.0], dtype=np.float64),
+        "thick_mm": 2.0,
+        "initialized": True,
+    }
+    bundle_plane = {
+        "plane_pt": [0.0, 4.0, 0.0],
+        "plane_n": [0.0, 1.0, 0.0],
+    }
+    _patch_trace_inputs_for_live_init(monkeypatch, live_init_plane=live_init_plane, bundle_plane=bundle_plane)
+
+    manifest = case_026_plane_debug_loop.run_trace(results_dir=tmp_path)
+    init_stage = _read_json(Path(manifest["artifacts"]["INIT"]))
+
+    assert init_stage["source"] == "live_init_window_planes_from_cameras"
+    assert "metadata" in init_stage
+    assert "init_inputs" in init_stage["metadata"]
+    assert "windows" in init_stage
+    assert "0" in init_stage["windows"]
+
+
 def test_run_trace_records_live_ba_stage_after_init(tmp_path, monkeypatch):
     live_init_plane = {
         "plane_pt": np.array([10.0, 0.0, 0.0], dtype=np.float64),
