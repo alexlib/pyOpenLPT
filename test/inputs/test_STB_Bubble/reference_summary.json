@@ -1,0 +1,20 @@
+{
+  "data_path": "D:\\0.Code\\OpenLPTGUI\\OpenLPT\\test\\inputs\\test_STB_Bubble\\data.mat",
+  "data_sha256": "bc40a16d95cc9913051615108a4a035256210e68ca612b5a1ca9b10dd8fbb853",
+  "manifest_path": "D:\\0.Code\\OpenLPTGUI\\OpenLPT\\test\\inputs\\test_STB_Bubble\\manifest.csv",
+  "manifest_rows": 250000,
+  "runtime_frame_range": {
+    "start": 0,
+    "end": 249
+  },
+  "source_frame_range": {
+    "start": 1,
+    "end": 250
+  },
+  "track_count": 1000,
+  "radius_mm": {
+    "min": 0.10017073110906946,
+    "max": 0.599738929317946,
+    "mean": 0.35129766509391214
+  }
+}

@@ -44,15 +44,22 @@ jobs:
       - name: Unit-check regression tooling
         run: |
           python -m pytest tests/test_regenerate_test_stb.py
+          python -m pytest tests/test_bubble_tracking_regression.py
 
       - name: Run fixed test_STB tracking regression gate
         run: |
           python test/inputs/test_STB/run_pr_tracking_regression.py
+
+      - name: Run fixed test_STB_Bubble tracking regression gate
+        run: |
+          python test/inputs/test_STB_Bubble/run_pr_tracking_regression.py
 
       - name: Upload metrics artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-stb-tracking-metrics
-          path: test/inputs/test_STB/e2e_metrics.json
+          path: |
+            test/inputs/test_STB/e2e_metrics.json
+            test/inputs/test_STB_Bubble/e2e_metrics.json
           if-no-files-found: ignore

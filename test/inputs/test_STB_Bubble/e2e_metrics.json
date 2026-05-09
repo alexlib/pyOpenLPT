@@ -1,0 +1,46 @@
+{
+  "manifest_path": "D:\\0.Code\\OpenLPTGUI\\OpenLPT\\test\\inputs\\test_STB_Bubble\\manifest.csv",
+  "result_dir": "D:\\0.Code\\OpenLPTGUI\\OpenLPT\\test\\results\\test_STB_Bubble\\ConvergeTrack",
+  "frame_end": 99,
+  "eval_frame_range": {
+    "start": 50,
+    "end": 99
+  },
+  "track_files": {
+    "D:\\0.Code\\OpenLPTGUI\\OpenLPT\\test\\results\\test_STB_Bubble\\ConvergeTrack\\LongTrackActive_99.csv": {
+      "exists": true,
+      "rows": 67415
+    },
+    "D:\\0.Code\\OpenLPTGUI\\OpenLPT\\test\\results\\test_STB_Bubble\\ConvergeTrack\\LongTrackInactive_99.csv": {
+      "exists": true,
+      "rows": 4951
+    },
+    "D:\\0.Code\\OpenLPTGUI\\OpenLPT\\test\\results\\test_STB_Bubble\\ConvergeTrack\\ExitTrack_99.csv": {
+      "exists": true,
+      "rows": 6091
+    }
+  },
+  "metrics": [
+    {
+      "label": "all_bubble_manifest_points",
+      "threshold_mm": 0.2,
+      "gt_rows": 50000,
+      "gt_tracks": 1000,
+      "detected_rows": 41439,
+      "detected_tracks": 821,
+      "matched_rows": 41439,
+      "correct_rows": 41370,
+      "coverage_C_track": 0.868,
+      "covered_gt_tracks": 868,
+      "position_error_mean_mm": 0.02683013952616092,
+      "position_error_median_mm": 0.024279808082404174,
+      "fragmentation_F_mean_detected_tracks_per_covered_gt": 1.096774193548387,
+      "correct_connection_Cr_mean_per_detected_track": 0.9606814148556844,
+      "correct_connection_Cr_median_per_detected_track": 1.0,
+      "radius_error_mean_mm": 0.015653381216877017,
+      "radius_error_median_mm": 0.013557904819693323,
+      "radius_error_p95_mm": 0.039298278630234385,
+      "radius_error_max_mm": 0.1583984470320265
+    }
+  ]
+}

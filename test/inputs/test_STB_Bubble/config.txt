@@ -1,0 +1,30 @@
+# Frame Range: [startID,endID]
+0,99
+# Frame Rate: [Hz]
+1
+# Number of Threads: (0: use as many as possible)
+0
+# Number of Cameras: 
+4
+# Camera File Path, Max Intensity
+camFile/cam1.txt,255
+camFile/cam2.txt,255
+camFile/cam3.txt,255
+camFile/cam4.txt,255
+# Image File Path
+imgFile/cam1ImageNames.txt
+imgFile/cam2ImageNames.txt
+imgFile/cam3ImageNames.txt
+imgFile/cam4ImageNames.txt
+# View Volume: (xmin,xmax,ymin,ymax,zmin,zmax)
+-20,20,-20,20,-20,20
+# Voxel to MM: e.g. use 1000^3 voxel, (xmax-xmin)/1000
+0.04
+# Output Folder Path: 
+../../results/test_STB_Bubble/
+# Object Types: 
+Bubble
+# STB Config Files:
+bubbleConfig.txt
+# Flag to load previous track files, previous frameID
+0,-1
