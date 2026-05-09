@@ -1,0 +1,34 @@
+name: Mirror PR Notice
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  notice:
+    if: github.repository == 'JHU-NI-LAB/OpenLPT_GUI'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment with source repository guidance
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `Thanks for the PR!
+
+            This repository is synchronized from the source development repository:
+            https://github.com/Shiyong-Tan/pyOpenLPT
+
+            Please reopen this change as a PR against the source repository so it can run the required tracking regression workflow.
+
+            We generally do not merge code changes directly into this lab mirror repository unless the change is specific to the mirror itself.`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
