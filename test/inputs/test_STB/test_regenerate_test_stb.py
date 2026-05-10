@@ -8,10 +8,11 @@ from pathlib import Path
 import numpy as np
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = REPO_ROOT / "test" / "inputs" / "test_STB" / "regenerate_test_stb.py"
-METRICS_MODULE_PATH = REPO_ROOT / "test" / "inputs" / "test_STB" / "evaluate_tracking_metrics.py"
-PR_RUNNER_MODULE_PATH = REPO_ROOT / "test" / "inputs" / "test_STB" / "run_pr_tracking_regression.py"
+TEST_STB_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = TEST_STB_ROOT.parents[2]
+MODULE_PATH = TEST_STB_ROOT / "regenerate_test_stb.py"
+METRICS_MODULE_PATH = TEST_STB_ROOT / "evaluate_tracking_metrics.py"
+PR_RUNNER_MODULE_PATH = TEST_STB_ROOT / "run_pr_tracking_regression.py"
 
 
 def _load_module():
@@ -122,7 +123,7 @@ def test_compute_projection_flags_distinguishes_visible_and_rendered():
 def test_parse_camera_file_reads_legacy_layout():
     mod = _load_module()
 
-    camera = mod.parse_camera_file(REPO_ROOT / "test" / "inputs" / "test_STB" / "camFile" / "cam1.txt")
+    camera = mod.parse_camera_file(TEST_STB_ROOT / "camFile" / "cam1.txt")
 
     assert camera.name == "cam1"
     assert camera.n_row == 1024
@@ -180,7 +181,6 @@ def test_pr_runner_accepts_metrics_that_meet_thresholds():
 
 def test_pr_runner_rejects_metrics_below_thresholds():
     mod = _load_pr_runner_module()
-
     metrics = {
         "metrics": [
             {

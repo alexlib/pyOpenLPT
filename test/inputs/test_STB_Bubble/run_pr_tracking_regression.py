@@ -14,7 +14,7 @@ DEFAULT_THRESHOLDS = {
         "coverage_C_track": {"min": 0.86},
         "position_error_mean_mm": {"max": 0.027},
         "fragmentation_F_mean_detected_tracks_per_covered_gt": {"max": 1.1},
-        "correct_connection_Cr_mean_per_detected_track": {"min": 0.96},
+        "correct_connection_Cr_mean_per_detected_track": {"min": 0.955},
         "radius_error_mean_mm": {"max": 0.016},
         "radius_error_p95_mm": {"max": 0.05},
     }

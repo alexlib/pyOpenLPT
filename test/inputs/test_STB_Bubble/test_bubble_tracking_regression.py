@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-BUBBLE_ROOT = REPO_ROOT / "test" / "inputs" / "test_STB_Bubble"
+BUBBLE_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = BUBBLE_ROOT.parents[2]
 MANIFEST_MODULE_PATH = BUBBLE_ROOT / "build_bubble_manifest.py"
 METRICS_MODULE_PATH = BUBBLE_ROOT / "evaluate_tracking_metrics.py"
 PR_RUNNER_MODULE_PATH = BUBBLE_ROOT / "run_pr_tracking_regression.py"

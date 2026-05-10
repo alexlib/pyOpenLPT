@@ -43,8 +43,8 @@ jobs:
 
       - name: Unit-check regression tooling
         run: |
-          python -m pytest tests/test_regenerate_test_stb.py
-          python -m pytest tests/test_bubble_tracking_regression.py
+          python -m pytest test/inputs/test_STB/test_regenerate_test_stb.py
+          python -m pytest test/inputs/test_STB_Bubble/test_bubble_tracking_regression.py
 
       - name: Run fixed test_STB tracking regression gate
         run: |
