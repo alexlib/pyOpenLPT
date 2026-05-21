@@ -36,6 +36,9 @@ openlpt-gui
 ```bash 
 # Run STB tracking directly with a config file
 openlpt path/to/config.txt
+
+# Show image preprocessing CLI help
+openlpt preprocess --help
 ```
 
 ### 3. Python API
@@ -168,6 +171,92 @@ To run the sample:
 1. Open OpenLPT GUI.
 2. Load the project configuration from the sample folders.
 3. Click 'Run tracking'.
+
+---
+
+## CLI Image Preprocessing
+
+Use `openlpt preprocess` to convert TIFF image lists, direct TIFF files, or Phantom CINE files into processed TIFF outputs plus OpenLPT image lists.
+
+### Auto-detect cameras from a data root
+
+```bash
+openlpt preprocess \
+  --input-root I:/VONSET/Data/20230123/T2 \
+  --frames 0 999
+```
+
+`--input-root` auto-detects cameras in natural order. It first looks for CINE files in `ROOT/Cam1/*.cine`, `ROOT/Cam2/*.cine`, ... (case-insensitive directory names are fine), and also supports flat roots such as `ROOT/cam1.cine`, `ROOT/cam2.cine`. If `--output-dir` is omitted in this mode, output defaults to `ROOT/imgFile`.
+
+### TIFF list preprocessing
+
+```bash
+openlpt preprocess \
+  --input-list cam1_images.txt \
+  --input-list cam2_images.txt \
+  --output-dir processed_tiffs
+```
+
+### CINE preprocessing on a cluster
+
+```bash
+openlpt preprocess \
+  --input-root /scratch/run01 \
+  --frames 0 999 \
+  --background mean
+```
+
+You can still use direct `--cine` paths when needed:
+
+```bash
+openlpt preprocess \
+  --cine /scratch/cam1.cine \
+  --cine /scratch/cam2.cine \
+  --frames 0 999 \
+  --output-dir /scratch/preprocessed \
+  --background mean
+```
+
+### Mean background, invert, and output image lists
+
+```bash
+openlpt preprocess \
+  --input-list cam1_images.txt \
+  --output-dir processed_tiffs \
+  --background mean \
+  --bg-count 50 \
+  --bg-stride 5 \
+  --invert
+```
+
+### Parallel processing with multiple workers
+
+```bash
+openlpt preprocess \
+  --input-list cam1_images.txt \
+  --input-list cam2_images.txt \
+  --output-dir processed_tiffs \
+  --workers 4
+```
+
+Use `--workers 0` to use all available CPU cores, which is convenient for cluster jobs:
+
+```bash
+openlpt preprocess \
+  --cine /scratch/cam1.cine \
+  --frames 0 999 \
+  --output-dir /scratch/preprocessed \
+  --workers 0
+```
+
+Processed TIFFs are written under `OUTPUT_DIR/camN/`, and per-camera image lists are written as `OUTPUT_DIR/camN_image_list.txt`.
+
+For `--input-root`, TIFF camera folders under the root are also auto-detected and processed in natural camera order. TIFF root mode currently expects per-camera subdirectories; flat TIFF roots are not auto-grouped.
+
+In the GUI preprocessing panel, use **Generate CLI** below **Process Image (Batch Export)** to create a command from the current GUI settings. When all loaded CINE files share a common `ROOT/CamN/` layout, the generated command prefers `--input-root ROOT` and uses `ROOT/imgFile` rather than `imgFile_processed`.
+
+> [!NOTE]
+> CINE preprocessing requires **pycine**, which is listed in this repository's `requirements.txt` and `pyproject.toml`. The preprocessing CLI modules are headless/Qt-free, but some full-repository install routes also include GUI dependencies such as PySide6.
 
 ---
 
