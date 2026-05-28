@@ -1519,7 +1519,7 @@ class TrackingSettingsView(QWidget):
         return pts_common.min(axis=0), pts_common.max(axis=0)
 
     def _validate_settings(self):
-        """Validate current settings by running 2D detection and 3D matching on the first frame."""
+        """Validate current settings by running 2D detection and 3D matching on the configured start frame."""
         from PySide6.QtWidgets import QProgressDialog, QApplication
         from PySide6.QtCore import Qt
         self._busy_begin('validate_settings', 'Validating tracking settings')
@@ -1582,7 +1582,7 @@ class TrackingSettingsView(QWidget):
             progress.setLabelText("Loading Images...")
             QApplication.processEvents()
             
-            # Load images for the first frame (frame_id = 0)
+            # Load images for the configured start frame.
             imgio_list = []
             folder_base = os.path.abspath(project_dir).replace('\\', '/') + '/'
             for path in basic_settings._image_file_paths:
@@ -1591,35 +1591,60 @@ class TrackingSettingsView(QWidget):
                 imgio_list.append(io)
                 
             num_cams = len(imgio_list)
-            frame_id = 0
+            frame_id = int(getattr(basic_settings, '_frame_start', 0))
             image_list = []
+            progress.setLabelText(f"Loading Images (frame {frame_id})...")
+            QApplication.processEvents()
             for i in range(num_cams):
                 image_list.append(imgio_list[i].loadImg(frame_id))
                 
-            progress.setLabelText("Detecting 2D Objects...")
+            progress.setLabelText(f"Detecting 2D Objects (frame {frame_id})...")
             QApplication.processEvents()
             
             # Detect 2D objects
             obj_finder = lpt.ObjectFinder2D()
             obj2d_list = []
             total_2d_count = 0
+            per_camera_2d_counts = []
             for cam_id in range(num_cams):
                 obj2ds = obj_finder.findObject2D(image_list[cam_id], obj_cfg)
                 obj2d_list.append(obj2ds)
                 count = len(obj2ds)
+                per_camera_2d_counts.append(count)
                 total_2d_count += count
-                print(f"[Validation] Camera {cam_id}: found {count} 2D objects.")
-                
+                print(f"[Validation] Frame {frame_id}, Camera {cam_id}: found {count} 2D objects.")
+                 
             avg_2d_count = total_2d_count / num_cams if num_cams > 0 else 0
-            
-            progress.setLabelText(f"Matching 3D Objects (2D Avg: {avg_2d_count:.1f})...")
+            camera_count_summary = ", ".join(
+                f"Cam {cam_id}: {count}" for cam_id, count in enumerate(per_camera_2d_counts)
+            ) or "No cameras"
+            zero_camera_ids = [cam_id for cam_id, count in enumerate(per_camera_2d_counts) if count == 0]
+            zero_camera_warning = ""
+            if zero_camera_ids:
+                zero_camera_warning = (
+                    "\n\nWarning: no 2D objects were detected in camera(s): "
+                    + ", ".join(str(cam_id) for cam_id in zero_camera_ids)
+                    + "."
+                )
+
+            if total_2d_count == 0:
+                progress.close()
+                error_msg = f"Validation failed for frame {frame_id}.\n\n" \
+                            "No 2D objects were detected in any camera, so 3D matching cannot proceed.\n\n" \
+                            f"Per-camera 2D counts: {camera_count_summary}\n\n" \
+                            "Check image paths, frame range, object detection thresholds, and image preprocessing settings."
+                print(f"[Validation] Frame {frame_id}: no 2D objects detected in any camera.")
+                QMessageBox.warning(self, "Validation Failed", error_msg)
+                return
+             
+            progress.setLabelText(f"Matching 3D Objects (frame {frame_id}, 2D Avg: {avg_2d_count:.1f})...")
             QApplication.processEvents()
             
             # Initial 3D match
             stereomath = lpt.StereoMatch(camera_models, obj2d_list, obj_cfg)
             obj3d_list = stereomath.match()
             count_3d = len(obj3d_list)
-            print(f"[Validation] Initial Match: found {count_3d} 3D objects.")
+            print(f"[Validation] Frame {frame_id} Initial Match: found {count_3d} 3D objects.")
             
             # Step 1: Iterative 2D tolerance increase if 3D count is too low (< 25% of avg 2D)
             orig_tol_2d = obj_cfg._sm_param.tol_2d_px
@@ -1632,7 +1657,7 @@ class TrackingSettingsView(QWidget):
                 current_tol_2d += tol_2d_step
                 obj_cfg._sm_param.tol_2d_px = current_tol_2d
                 
-                progress.setLabelText(f"Stage 1 (2D Tol): Matching 3D (tol={current_tol_2d:.2f})...")
+                progress.setLabelText(f"Stage 1 (2D Tol): Matching 3D frame {frame_id} (tol={current_tol_2d:.2f})...")
                 if progress.wasCanceled(): break
                 QApplication.processEvents()
                 
@@ -1641,7 +1666,7 @@ class TrackingSettingsView(QWidget):
                 obj3d_list = stereomath.match()
                 count_3d = len(obj3d_list)
                 modified_2d = True
-                print(f"[Validation] Retry Match (2D tol={current_tol_2d:.2f}): found {count_3d} 3D objects.")
+                print(f"[Validation] Frame {frame_id} Retry Match (2D tol={current_tol_2d:.2f}): found {count_3d} 3D objects.")
 
             # Step 2: Iterative 3D tolerance increase if still insufficient
             orig_tol_3d_mm = obj_cfg._sm_param.tol_3d_mm
@@ -1654,7 +1679,7 @@ class TrackingSettingsView(QWidget):
                 current_tol_3d_mm += tol_3d_step_mm
                 obj_cfg._sm_param.tol_3d_mm = current_tol_3d_mm
                 
-                progress.setLabelText(f"Stage 2 (3D Tol): Matching 3D (tol={current_tol_3d_mm:.2f}mm)...")
+                progress.setLabelText(f"Stage 2 (3D Tol): Matching 3D frame {frame_id} (tol={current_tol_3d_mm:.2f}mm)...")
                 if progress.wasCanceled(): break
                 QApplication.processEvents()
                 
@@ -1663,16 +1688,18 @@ class TrackingSettingsView(QWidget):
                 obj3d_list = stereomath.match()
                 count_3d = len(obj3d_list)
                 modified_3d = True
-                print(f"[Validation] Retry Match (3D tol={current_tol_3d_mm:.2f}mm): found {count_3d} 3D objects.")
+                print(f"[Validation] Frame {frame_id} Retry Match (3D tol={current_tol_3d_mm:.2f}mm): found {count_3d} 3D objects.")
             
             progress.close()
             
             # Check final result
             if count_3d < (avg_2d_count / 4.0):
-                error_msg = f"Validation failed.\n\n" \
+                error_msg = f"Validation failed for frame {frame_id}.\n\n" \
                             f"Even with 2D tolerance increased by {current_tol_2d - orig_tol_2d:.1f}px " \
                             f"and 3D tolerance increased by {current_tol_3d_mm - orig_tol_3d_mm:.1f}mm, " \
                             f"only {count_3d} 3D objects were reconstructed from ~{avg_2d_count:.1f} 2D objects.\n\n" \
+                            f"Per-camera 2D counts: {camera_count_summary}" \
+                            f"{zero_camera_warning}\n\n" \
                             "The current camera parameters may be inaccurate or invalid for tracking."
                 QMessageBox.warning(self, "Validation Failed", error_msg)
             else:
@@ -1694,13 +1721,19 @@ class TrackingSettingsView(QWidget):
                     if modified_3d: adjust_info.append(f"3D tolerance -> {current_tol_3d_mm:.2f}mm")
                     
                     msg = f"Validation successful with adjustment!\n\n" \
+                          f"Validated Frame: {frame_id}\n" \
                           f"Adjustments: {', '.join(adjust_info)}\n" \
                           f"3D Objects: {count_3d}\n" \
-                          f"Average 2D Objects: {avg_2d_count:.1f}"
+                          f"Average 2D Objects: {avg_2d_count:.1f}\n" \
+                          f"Per-camera 2D counts: {camera_count_summary}" \
+                          f"{zero_camera_warning}"
                 else:
                     msg = f"Validation Successful!\n\n" \
+                          f"Validated Frame: {frame_id}\n" \
                           f"3D Objects: {count_3d}\n" \
-                          f"Average 2D Objects: {avg_2d_count:.1f}"
+                          f"Average 2D Objects: {avg_2d_count:.1f}\n" \
+                          f"Per-camera 2D counts: {camera_count_summary}" \
+                          f"{zero_camera_warning}"
                 
                 QMessageBox.information(self, "Validation Result", msg)
 

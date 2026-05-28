@@ -26,6 +26,144 @@ from PySide6.QtCore import QRect, Signal, QPoint, QThread, QTimer, Slot, QObject
 
 from .image_utils import load_image_any_depth, to_gray_uint8, to_rgb_uint8
 
+
+def format_calibration_error_stats(stats):
+    """Format camFile error stats as 'mean,std' or 'None'."""
+    if stats is None:
+        return "None"
+    try:
+        mean, std = stats
+        if mean is None or std is None:
+            return "None"
+        mean = float(mean)
+        std = float(std)
+        if not np.isfinite(mean) or not np.isfinite(std):
+            return "None"
+        return f"{mean:.8g},{std:.8g}"
+    except Exception:
+        return "None"
+
+
+def compute_projection_error_stats(world_points, image_points, rvec, tvec, K, dist):
+    """Return mean/std Euclidean reprojection error in pixels for pinhole data."""
+    world = np.asarray(world_points, dtype=np.float64).reshape(-1, 3)
+    image = np.asarray(image_points, dtype=np.float64).reshape(-1, 2)
+    if world.size == 0 or len(world) != len(image):
+        return None
+    proj_pts, _ = cv2.projectPoints(world, rvec, tvec, np.asarray(K, dtype=np.float64), np.asarray(dist, dtype=np.float64))
+    errors = np.linalg.norm(proj_pts.reshape(-1, 2) - image, axis=1)
+    if errors.size == 0:
+        return None
+    return float(np.mean(errors)), float(np.std(errors))
+
+
+def _camera_projection_matrix_normalized(params):
+    """Return [R|T] for normalized undistorted pinhole observations."""
+    R = np.asarray(params.get('R'), dtype=np.float64).reshape(3, 3)
+    T = params.get('T', params.get('tvec'))
+    T = np.asarray(T, dtype=np.float64).reshape(3, 1)
+    return np.hstack([R, T])
+
+
+def _undistort_to_normalized_point(uv, params):
+    K = np.asarray(params.get('K'), dtype=np.float64).reshape(3, 3)
+    dist = np.asarray(params.get('dist', np.zeros(5)), dtype=np.float64).reshape(-1, 1)
+    pts = np.asarray(uv, dtype=np.float64).reshape(1, 1, 2)
+    norm = cv2.undistortPoints(pts, K, dist)
+    return norm.reshape(2)
+
+
+def _linear_triangulate_normalized(obs_by_cam, all_camera_params):
+    """DLT triangulation from normalized camera observations."""
+    rows = []
+    for cam_idx, uv in sorted(obs_by_cam.items()):
+        params = all_camera_params.get(cam_idx)
+        if params is None:
+            continue
+        try:
+            x, y = _undistort_to_normalized_point(uv, params)
+            P = _camera_projection_matrix_normalized(params)
+        except Exception:
+            continue
+        rows.append(x * P[2, :] - P[0, :])
+        rows.append(y * P[2, :] - P[1, :])
+    if len(rows) < 4:
+        return None
+    A = np.asarray(rows, dtype=np.float64)
+    try:
+        _, _, vt = np.linalg.svd(A)
+        X_h = vt[-1, :]
+    except np.linalg.LinAlgError:
+        return None
+    if abs(X_h[3]) < 1e-12:
+        return None
+    X = X_h[:3] / X_h[3]
+    if not np.all(np.isfinite(X)):
+        return None
+    return X
+
+
+def compute_plate_triangulation_error_stats(all_camera_params, saved_calibration_data):
+    """
+    Compute mean/std 3D reconstruction error in mm for shared plate points.
+
+    Points are grouped by rounded global/world 3D coordinate. Each grouped point
+    must have observations from at least two calibrated pinhole cameras; otherwise
+    triangulation is unavailable and None is returned.
+    """
+    if not all_camera_params or len(all_camera_params) < 2 or not saved_calibration_data:
+        return None
+
+    valid_cam_params = {}
+    for cam_idx, params in all_camera_params.items():
+        try:
+            _camera_projection_matrix_normalized(params)
+            np.asarray(params.get('K'), dtype=np.float64).reshape(3, 3)
+            valid_cam_params[int(cam_idx)] = params
+        except Exception:
+            continue
+    if len(valid_cam_params) < 2:
+        return None
+
+    grouped = {}
+    for (cid, _img_path), data in saved_calibration_data.items():
+        cid = int(cid)
+        if cid not in valid_cam_params:
+            continue
+        keypoints = data.get('keypoints', [])
+        worlds = data.get('world_coords', [])
+        for kp, world in zip(keypoints, worlds):
+            if world is None or kp is None:
+                continue
+            world_arr = np.asarray(world, dtype=np.float64).reshape(3)
+            if not np.all(np.isfinite(world_arr)):
+                continue
+            uv = np.asarray(kp.pt, dtype=np.float64).reshape(2)
+            if not np.all(np.isfinite(uv)):
+                continue
+            key = tuple(round(float(v), 6) for v in world_arr)
+            entry = grouped.setdefault(key, {'world': world_arr, 'uvs_by_cam': {}})
+            entry['uvs_by_cam'].setdefault(cid, []).append(uv)
+
+    errors = []
+    for entry in grouped.values():
+        obs_by_cam = {
+            cid: np.mean(np.asarray(uvs, dtype=np.float64), axis=0)
+            for cid, uvs in entry['uvs_by_cam'].items()
+            if len(uvs) > 0
+        }
+        if len(obs_by_cam) < 2:
+            continue
+        X = _linear_triangulate_normalized(obs_by_cam, valid_cam_params)
+        if X is None:
+            continue
+        errors.append(float(np.linalg.norm(X - entry['world'])))
+
+    if not errors:
+        return None
+    errors = np.asarray(errors, dtype=np.float64)
+    return float(np.mean(errors)), float(np.std(errors))
+
 class ZoomableImageLabel(QLabel):
     """
     Label with zoom, pan, and multiple interaction modes.
@@ -4119,11 +4257,14 @@ class CameraCalibrationView(QWidget):
         target_cam_idx = self.cal_target_cam_combo.currentIndex()
         print(f"Running Plate Calibration for Camera {target_cam_idx+1}...")
         
-        # 1. Gather all points for this camera
-        img_points = []
-        obj_points = []
-        
-        # Unique paths that have data for this camera
+        # 1. Gather all global 3D-2D correspondences for this camera.
+        # OpenLPT_calPoints.csv plate points are already expressed in one
+        # global coordinate system, so they must be calibrated as one OpenCV
+        # view instead of one view per image/path.
+        all_kpts_list = []
+        all_world_list = []
+
+        # Data entries that have observations for this camera.
         relevant_keys = [k for k in self.saved_calibration_data.keys() if k[0] == target_cam_idx]
         
         if not relevant_keys:
@@ -4143,11 +4284,28 @@ class CameraCalibrationView(QWidget):
             world = np.array([wc for _, wc in valid_pairs], dtype=np.float32)
             
             if len(kpts) > 0:
-                img_points.append(kpts)
-                obj_points.append(world)
-                
-        if not img_points:
+                all_kpts_list.append(kpts)
+                all_world_list.append(world)
+
+        if not all_kpts_list:
             QMessageBox.warning(self, "No Data", "No valid point sets found.")
+            self._busy_end('plate_calibration')
+            return
+
+        all_kpts = np.vstack(all_kpts_list).astype(np.float32)
+        all_world = np.vstack(all_world_list).astype(np.float32)
+        print(
+            f"[PlateCalib] Camera {target_cam_idx+1}: using "
+            f"{len(all_world)} global 3D-2D correspondences from "
+            f"{len(relevant_keys)} data entries as a single OpenCV view."
+        )
+
+        if len(all_world) < 6:
+            QMessageBox.warning(
+                self,
+                "Insufficient Data",
+                "At least 6 valid 3D-2D point correspondences are required for plate calibration."
+            )
             self._busy_end('plate_calibration')
             return
 
@@ -4172,18 +4330,21 @@ class CameraCalibrationView(QWidget):
         dist_num = self.cal_dist_model_combo.currentIndex() if hasattr(self, 'cal_dist_model_combo') else 0
         dist_coeffs = np.zeros(5, dtype=np.float32) # Always use 5 for standard pinhole logic
         
-        # 3. Stage 1: Solve for Pose (Extrinsics) using solvePnP for initial guess
-        # We pick the first set of points for a rough pose initialization.
-        success_pnp, rvec, tvec = cv2.solvePnP(obj_points[0], img_points[0], K, dist_coeffs)
+        # 3. Stage 1: Solve for Pose (Extrinsics) using all global points.
+        try:
+            success_pnp, rvec, tvec = cv2.solvePnP(all_world, all_kpts, K, dist_coeffs)
+        except cv2.error as e:
+            QMessageBox.warning(self, "PnP Failed", f"Initial pose estimation (PnP) error: {str(e)}")
+            self._busy_end('plate_calibration')
+            return
         if not success_pnp:
             QMessageBox.critical(self, "Error", "Initial pose estimation (PnP) failed.")
             self._busy_end('plate_calibration')
             return
-            
+             
         # 4. Stage 2: Refine All (Intrinsics + Extrinsics)
-        # calibrateCamera expects lists of rvecs/tvecs for initial guess.
-        rvecs = [rvec.copy() for _ in range(len(img_points))]
-        tvecs = [tvec.copy() for _ in range(len(img_points))]
+        # Pass all global plate correspondences as one OpenCV view so the
+        # returned rvecs_opt[0]/tvecs_opt[0] is the single global pose.
         
         # Calibration Flags: Always use intrinsic guess
         flags = cv2.CALIB_USE_INTRINSIC_GUESS 
@@ -4200,16 +4361,28 @@ class CameraCalibrationView(QWidget):
         
         try:
             rms, K_opt, dist_opt, rvecs_opt, tvecs_opt = cv2.calibrateCamera(
-                obj_points, img_points, img_size, K, dist_coeffs, 
+                [all_world], [all_kpts], img_size, K, dist_coeffs,
                 flags=flags
             )
         except Exception as e:
             QMessageBox.critical(self, "Calibration Failed", f"Optimization error: {str(e)}")
             self._busy_end('plate_calibration')
             return
-            
+
+        proj_pts, _ = cv2.projectPoints(all_world, rvecs_opt[0], tvecs_opt[0], K_opt, dist_opt)
+        proj_pts = proj_pts.reshape(-1, 2)
+        residuals = proj_pts - all_kpts.reshape(-1, 2)
+        point_proj_errors = np.linalg.norm(residuals, axis=1)
+        global_rms = float(np.sqrt(np.mean(point_proj_errors * point_proj_errors)))
+        proj_error_stats = (float(np.mean(point_proj_errors)), float(np.std(point_proj_errors)))
+        print(
+            f"[PlateCalib] Camera {target_cam_idx+1}: OpenCV RMS={float(rms):.6f} px, "
+            f"final global reprojection RMS={global_rms:.6f} px, "
+            f"proj mean/std={proj_error_stats[0]:.6f}/{proj_error_stats[1]:.6f} px"
+        )
+             
         # 5. Display Results
-        self.lbl_cal_rms.setText(f"{rms:.4f} px")
+        self.lbl_cal_rms.setText(f"{global_rms:.4f} px")
         
         # 6. Store Calibration Results
         R_first, _ = cv2.Rodrigues(rvecs_opt[0])
@@ -4222,22 +4395,25 @@ class CameraCalibrationView(QWidget):
             'K': K_opt,
             'dist': dist_opt,
             'img_size': (h, w),
-            'rms': rms
+            'rms': global_rms,
+            # camFile Camera Calibration Error: per-point Euclidean reprojection
+            # error mean/std in pixels for this camera's merged global plate data.
+            'proj_error': proj_error_stats,
+            'proj_mean': proj_error_stats[0],
+            'proj_std': proj_error_stats[1],
         }
         
         # 7. Update 3D View with ALL calibrated cameras
         # Reformat for plot_calibration (expects 1-based keys)
         cam_viz_data = {idx + 1: params for idx, params in self.all_camera_params.items()}
         
-        # Combine all 3D points from all images into one cloud
-        all_3d = np.vstack(obj_points)
-        
-        self.plate_3d_viewer.plot_calibration(cam_viz_data, all_3d)
+        # Show the same merged global 3D points used for calibration.
+        self.plate_3d_viewer.plot_calibration(cam_viz_data, all_world)
         self.plate_vis_tabs.setCurrentWidget(self.plate_3d_viewer)
         
         # 8. Notify user (no per-camera save prompt - use Save All button instead)
         QMessageBox.information(self, "Calibration Complete", 
-                               f"Camera {target_cam_idx+1} calibrated successfully.\nRMS: {rms:.4f} px\n\nUse 'Save All Camera Parameters' to export.")
+                               f"Camera {target_cam_idx+1} calibrated successfully.\nRMS: {global_rms:.4f} px\n\nUse 'Save All Camera Parameters' to export.")
         self._busy_end('plate_calibration')
 
     def _collect_plate_refraction_inputs(self):
@@ -4543,15 +4719,21 @@ class CameraCalibrationView(QWidget):
                                                  "Text Files (*.txt)")
         if not file_path:
             return
-            
+             
         try:
+            params = getattr(self, 'all_camera_params', {}).get(cam_idx, {})
+            proj_error = params.get('proj_error')
+            if proj_error is None and 'proj_mean' in params and 'proj_std' in params:
+                proj_error = (params.get('proj_mean'), params.get('proj_std'))
+            tri_error = params.get('tri_error', params.get('triang_error'))
+
             with open(file_path, 'w') as f:
                 f.write("# Camera Model: (PINHOLE/POLYNOMIAL)\n")
                 f.write("PINHOLE\n")
                 f.write("# Camera Calibration Error: \n")
-                f.write("None\n")
+                f.write(f"{format_calibration_error_stats(proj_error)}\n")
                 f.write("# Pose Calibration Error: \n")
-                f.write("None\n")
+                f.write(f"{format_calibration_error_stats(tri_error)}\n")
                 f.write("# Image Size: (n_row,n_col)\n")
                 f.write(f"{img_size[1]},{img_size[0]}\n") # H, W
                 
@@ -4689,6 +4871,21 @@ class CameraCalibrationView(QWidget):
         cam_folder = Path(folder) / "camFile"
         cam_folder.mkdir(parents=True, exist_ok=True)
         
+        tri_error_stats = compute_plate_triangulation_error_stats(
+            self.all_camera_params,
+            getattr(self, 'saved_calibration_data', None),
+        )
+        if tri_error_stats is None:
+            print(
+                "[PlateCalib] Multi-camera triangulation error unavailable; "
+                "need at least two calibrated pinhole cameras observing shared global plate points."
+            )
+        else:
+            print(
+                f"[PlateCalib] Pose triangulation error mean/std="
+                f"{tri_error_stats[0]:.6f}/{tri_error_stats[1]:.6f} mm"
+            )
+
         saved_count = 0
         try:
             for cam_idx, params in sorted(self.all_camera_params.items()):
@@ -4699,14 +4896,18 @@ class CameraCalibrationView(QWidget):
                 R = params['R']
                 T = params['T']
                 img_size = params['img_size']
+                proj_error = params.get('proj_error')
+                if proj_error is None and 'proj_mean' in params and 'proj_std' in params:
+                    proj_error = (params.get('proj_mean'), params.get('proj_std'))
+                tri_error = params.get('tri_error', params.get('triang_error', tri_error_stats))
                 
                 with open(file_path, 'w') as f:
                     f.write("# Camera Model: (PINHOLE/POLYNOMIAL)\n")
                     f.write("PINHOLE\n")
                     f.write("# Camera Calibration Error: \n")
-                    f.write("None\n")
+                    f.write(f"{format_calibration_error_stats(proj_error)}\n")
                     f.write("# Pose Calibration Error: \n")
-                    f.write("None\n")
+                    f.write(f"{format_calibration_error_stats(tri_error)}\n")
                     f.write("# Image Size: (n_row,n_col)\n")
                     f.write(f"{img_size[0]},{img_size[1]}\n")  # H, W
                     
