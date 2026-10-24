@@ -77,3 +77,4 @@ docs/
 Paper/
 
 .opencode-agenthub
+uv.lock
